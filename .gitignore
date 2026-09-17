@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 本地数据与运行时产物
+*.db
+*.sqlite3
+*.log
+
+# 本地环境与凭据（不得入库）
+.env
+.env.*
+!.env.example
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+
+# Agent 技能副本：可由 `openspec update` 重新生成
+.agents/
