@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "notify-hub"
+version = "0.1.0"
+description = "统一的消息汇聚、分类、待办跟踪与多渠道路由通知服务"
+# 注：README.md 由 M9（文档模块）创建，为避免与模块文件边界重叠，此处暂不声明 readme 字段。
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "sqlmodel>=0.0.22",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "httpx>=0.27",
+    "typer>=0.12",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "aiosmtpd>=1.4",
+]
+
+[project.scripts]
+notify = "notify_hub.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"*" = ["templates/*.html", "*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    # starlette 1.6 建议改用 httpx2；当前版本可用，无需处理（见 architecture.md 1.3）
+    "ignore:Using .httpx. with .starlette.testclient.",
+]
