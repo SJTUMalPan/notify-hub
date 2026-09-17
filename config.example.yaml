@@ -1,0 +1,31 @@
+# notify-hub 配置示例
+#
+# 复制为 config.yaml 后按需修改（也可用环境变量 NOTIFY_HUB_CONFIG 指向其它路径）。
+# credentials 的值是**环境变量名**；服务启动时读取该环境变量的值作为凭据。
+# 若环境变量未设置，渠道的 credentials_complete 为 false（渠道不可用，但服务照常启动）。
+server:
+  host: 127.0.0.1
+  port: 8000
+  log_level: INFO
+storage:
+  db_path: ./data/notify.db
+rules:
+  path: ./rules.yaml
+  poll_interval_seconds: 5
+reminders:
+  scan_interval_seconds: 60
+  first_reminder_after_seconds: 1800
+  reminder_interval_seconds: 3600
+default_channel: webhook
+channels:
+  - id: webhook
+    type: webhook
+    enabled: true
+    params: { url_env: NOTIFY_WEBHOOK_URL, field_map: {}, headers: {} }
+    credentials: { url: NOTIFY_WEBHOOK_URL }
+  - id: email
+    type: email
+    enabled: false
+    params: { host: smtp.example.com, port: 587, use_tls: true,
+              sender: notify@example.com, recipients: [me@example.com] }
+    credentials: { password: NOTIFY_SMTP_PASSWORD }
