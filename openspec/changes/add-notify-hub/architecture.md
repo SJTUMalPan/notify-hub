@@ -322,6 +322,23 @@ class Notifier(Protocol):
 
 **不变量**：`send()` **MUST NOT 抛异常**——任何渠道侧/网络侧错误都必须转成 `DeliveryResult.failure()`。
 
+**不变量（第二次 P1 后新增，对**所有**适配器生效）**：
+**适配器若自身持有 URL 形态的凭据，MUST 在 `__init__` 中从该 URL 派生密钥
+（`redact.extract_url_secrets(webhook_url, ...)`）并与注入的 `secrets` 合并后作为
+自己的脱敏密钥集合。**
+
+**为什么必须这样、而不是要求调用方传对**：「凭据 MUST NOT 出现在日志/error_reason 中」
+是本项目的安全不变量，而**同一个类别的缺陷已经以三种不同形态出现过三次**——
+（1）query token 未进密钥集合；（2）路径 token 未进密钥集合；（3）调用方构造适配器时没传
+`secrets`。每次都靠「在某个调用点补上参数」，就必然会有下一个调用点漏掉。
+适配器**手里本来就有 URL**，从它派生是最可靠的来源，使该不变量**由构造保证、不依赖调用方纪律**。
+
+签名要求：
+```python
+self._secrets = tuple(dict.fromkeys((*secrets, *extract_url_secrets(webhook_url))))
+```
+（保序去重；`secrets` 仍照收，用于覆盖调用方知道而 URL 里没有的额外密钥。）
+
 ---
 
 ## 5. 模块清单、批次与预算
@@ -358,11 +375,13 @@ class Notifier(Protocol):
 | M7 | HTTP 接入层 + 受理编排 | `src/notify_hub/api/*`、`pipeline.py` | `tests/test_ingest.py`、`tests/test_api_todos.py` | M1–M4, M6 | 4 |
 | M8 | Web 待办界面 | `src/notify_hub/web/*` | `tests/test_web.py` | M2, M6 | 4 |
 | M9 | 文档与部署 | `README.md`、`docs/*.md` | `tests/test_docs_contract.py` | M1–M8 | 5 |
+| M10 | 飞书自定义机器人适配器 | `src/notify_hub/notifiers/feishu.py`（+ `notifiers/__init__.py` 中授权追加的一条注册项） | `tests/test_notifiers_feishu.py` | M1, M4, M6 | 6 |
 | — | 跨模块集成（阶段 D） | — | `tests/test_integration.py`、`tests/test_e2e.py` | 全部 | D |
 
-**模块数：9。预计派发次数：≈ 36**（每模块：模块测试 + 实现 + 集成 + 审查，`9 × 4`；
-精确下限为 9 次 verify + 9 次 dev + 1 次集成 + 1 次 review = 20，余量为返工与冲突裁决）。
-**超过 8 个模块的阈值，已按流程单独向用户确认。**
+**模块数：10（M10 为用户验收飞书渠道而追加，属同一变更内的增量）。**
+前 9 个模块的实际派发为 **31 次**（预估 ≈4/模块；实测集成与审查是跨模块各一次而非每模块各一次）。
+M10 预计 **3 次**：模块测试 + 实现 + 定向复审。
+**超过 8 个模块的阈值，已按流程单独向用户确认过两次（9 模块一次、M10 增量一次）。**
 
 批次内可完全并行（文件边界互不重叠，见第 9 节）；批次之间是硬屏障。
 
@@ -455,16 +474,25 @@ def redact_url(url: str, secrets: Iterable[str] = ()) -> str:
     第 1、2 条是无条件的：即使 secrets 为空，也 MUST 掩码。这是防止含 basic-auth 的
     webhook 地址或带 token 的地址被写进日志/投递记录的兜底。"""
 
-def extract_url_secrets(url: str, *, min_length: int = 6) -> tuple[str, ...]:
+def extract_url_secrets(url: str, *, min_length: int = 6,
+                        path_min_length: int = 16) -> tuple[str, ...]:
     """从 URL 中提取应被视为**独立密钥**的成分（供 `credential_values` 展开用）：
-      - query 中键名命中 SENSITIVE_KEYS 的值（大小写不敏感、含后缀匹配）
-      - userinfo 的密码部分
+      - query 中键名命中 SENSITIVE_KEYS 的值（大小写不敏感、含后缀匹配）——阈值 `min_length`
+      - userinfo 的密码部分——阈值 `min_length`
+      - **路径中每一段**满足「长度 ≥ `path_min_length` 且仅由 `[A-Za-z0-9_-]` 组成」的片段
     输入不是合法 URL 时返回空元组。结果去重、剔除空串。
 
     **`min_length=6` 是刻意的安全阀，不是随手取的**：`SENSITIVE_KEYS` 含通用键名 `key`，
     若把 `?key=1` 的值 `"1"` 收进全局密钥集合，`redact_text` 会把**日志里所有出现的 `1`**
     都打成 `***`，日志立刻不可读。长度不足 `min_length` 的成分**不**进入全局密钥集合
     （它们仍会被 `redact_url` 在 URL 内部按键名掩码，所以不会因此暴露）。
+
+    **`path_min_length=16` 是更高的一道安全阀，理由同上但更严**：很多平台把凭据放在
+    **URL 路径末段**而不是 query——飞书 `…/hook/<token>`、Slack `…/services/T/B/<token>`、
+    Discord `/api/webhooks/<id>/<token>`。这些片段的长度普遍 ≥ 24，而普通路径段
+    （`status`、`api`、`hook`、`send`）都很短。若沿用 6 的门槛，`https://h/status` 会把
+    `status` 收进全局密钥集合，把日志里所有 `status` 打成 `***`。取 16 可在「覆盖真实 token」
+    与「不误伤普通路径」之间取得安全的一侧。字符集限制同理：只收形如不透明令牌的片段。
 
     **「是否是 URL」的判定（冻结，勿自行发挥）**：以 `urlsplit(url).scheme` **非空**为准。
     因此裸 query 串（如 `"?ACCESS_TOKEN=abcdefgh"`）**不是** URL → 返回空元组。
@@ -587,6 +615,14 @@ class SecretFilter(logging.Filter):
      （且不抛异常）；
    - 长度不足：`"?token=abc"` → 空元组（`min_length=6` 生效）；
    - 非 URL 输入（`"not a url"`、`""`）→ 空元组，不抛异常。
+   - **路径末段 token（P1 第二次的回归点，必须覆盖）**：
+     - 飞书形态 `"https://open.feishu.cn/open-apis/bot/v2/hook/FSECRETTOKEN1234567890"`
+       → 含 `FSECRETTOKEN1234567890`；
+     - Slack 形态 `"https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX"`
+       → 含那段 `XXXX…`（≥16）；
+     - **安全阀必须生效**：`"https://h/status"` → 空元组（6 ≤ 9 < 16，不进入全局集合，
+       否则日志里所有 `status` 会被打成 `***`）；
+     - 字符集限制：含非 `[A-Za-z0-9_-]` 的长片段不提取（如 `"https://h/aaaa.bbbb.cccc.dddd"`）。
 6. **脱敏（安全关键，必须逐项断言）**：
    - `redact_url("https://oapi.dingtalk.com/robot/send?access_token=abc123def&x=1")` 的输出
      不含 `abc123def`，且含 `access_token=***`。
@@ -1959,6 +1995,193 @@ TEMPLATES_DIR: Path    # = Path(__file__).parent / "templates"
 
 ---
 
+### 模块 M10：飞书（Feishu / Lark）自定义机器人适配器
+
+> **为什么单独做一个适配器**：`design.md` 的风险清单已预判此事——「webhook 平台差异大，
+> 通用 `webhook` 适配器可能覆盖不全（如飞书要求特定 `msg_type` 结构）→ 若某平台确需专属逻辑，
+> 按适配器契约新增一个专属适配器（如 `feishu`），**这正是抽象层要兑现的价值**」。
+> 实测确认：通用 `webhook` 发的是**平铺 JSON**，而飞书/钉钉/企业微信都要求**嵌套**结构，
+> 且 `field_map` 只做顶层键改名、无法表达嵌套。故新增本模块，不修改 `webhook` 适配器。
+
+**文件边界**
+- 实现路径：`src/notify_hub/notifiers/feishu.py`；以及 `src/notify_hub/notifiers/__init__.py` 中
+  **被明确授权追加的、且仅一条** `"feishu"` 工厂注册项（该文件其余内容不得改动）
+- 测试路径：`tests/test_notifiers_feishu.py`
+
+#### 1. 功能
+
+按飞书自定义机器人的**真实协议**投递通知。**不负责**：渠道选择与降级（M4）、脱敏（M1）、
+消息格式分类（M3）。**不做**富文本/卡片消息（首版只做 `text`）。
+
+#### 2. 接口
+
+```python
+# 飞书签约算法（纯函数，便于独立测试）
+def sign_feishu(timestamp: int, secret: str) -> str: ...
+
+class FeishuNotifier:
+    def __init__(self, channel_id: str, webhook_url: str, *, secret: str | None = None,
+                 timeout: float = 10.0, transport: httpx.BaseTransport | None = None,
+                 clock: Clock | None = None, secrets: Sequence[str] = ()) -> None: ...
+    channel_id: str
+    def capabilities(self) -> ChannelCapabilities: ...
+    def send(self, msg: NotificationMessage) -> DeliveryResult: ...
+
+def build_feishu_notifier(spec: ChannelSpec, secrets: Sequence[str]) -> FeishuNotifier: ...
+```
+
+**配置映射（冻结）**
+| 来源 | 目标参数 | 说明 |
+|---|---|---|
+| `credentials["url"]` | `webhook_url` | **必填**；形如 `https://open.feishu.cn/open-apis/bot/v2/hook/<token>` |
+| `credentials["secret"]` | `secret` | 可选；**提供即启用加签** |
+| `params.timeout` | `timeout` | 缺省 `10.0` |
+
+`clock` 注入只影响**加签用的 timestamp**（默认 `SystemClock`），使测试可冻结时间断言签名。
+
+#### 3. 内部实现（协议要点，全部来自飞书官方文档，均已核实）
+
+来源：[自定义机器人使用指南](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot?lang=zh-CN)
+
+1. **请求体形状**：
+   `{"msg_type": "text", "content": {"text": "<纯文本>"}}`
+   这是**嵌套**结构，与通用 `webhook` 适配器的平铺载荷完全不同。
+2. **加签字段位置**：`timestamp` 与 `sign` 放在 **JSON body 顶层**，**不是 URL query**。
+   放 query 不会报错但**验签必然失败**——这是最隐蔽的坑，必须有测试固定。
+3. **`timestamp` 单位是秒**（`int(time.time())`），**不是毫秒**。
+4. **签名算法**：
+   ```python
+   string_to_sign = f"{timestamp}\n{secret}"
+   hmac_code = hmac.new(string_to_sign.encode("utf-8"), digestmod=hashlib.sha256).digest()
+   sign = base64.b64encode(hmac_code).decode("utf-8")
+   ```
+   **注意 `hmac.new` 的第一个参数（key）是 `string_to_sign`，消息体为空**——与常规
+   `hmac.new(secret, data)` 的写法相反，习惯性写反会得到错误签名。
+5. **成功判定**：HTTP 2xx **且** 响应体 JSON 的 `code == 0`。
+   成功响应形如 `{"code": 0, "data": {}, "msg": "success"}`。
+6. **失败判定与原因**：
+   - HTTP 非 2xx → 失败，`error_reason` 含状态码。
+   - JSON `code != 0` → 失败，`error_reason` 取 `msg`。已知错误码：
+     `9499 Bad Request`、`19021 sign match fail or timestamp is not within one hour from current time`、
+     `19024 Key Words Not Found`、`19022 Ip Not Allowed`、`11232` 限流。
+   - 响应体非 JSON → 只看 HTTP 状态。
+7. **`receipt`**：取响应体 `msg`（非空时），否则 `f"HTTP {status_code}"`。**永不为空**。
+8. **文本内容**（`content.text`）**格式冻结如下**（多行字符串）：
+   ```
+   [<LEVEL>] <title>
+   来源: <source>
+   时间: <YYYY-MM-DD HH:MM:SS>            ← UTC，去微秒（与 M8 页面同一格式）
+   分类: <category>                        ← category 为 None 时整行省略
+   已超时: <format_duration(overdue)>      ← 仅 kind == REMINDER 时出现
+   <空行>
+   <body>                                  ← body 为 None 时省略该行与其前的空行
+   ```
+   `<LEVEL>` 取 `msg.level.value.upper()`（`INFO`/`WARNING`/`ERROR`）。
+   超时时长**复用 M6 的** `notify_hub.services.notifications.format_duration`（与 M8 同一裁定：
+   同一段用户可见文案不得有两份实现）。
+9. **`capabilities()` 取值冻结**：`supports_rich_text=False`（首版只做 `text`）、
+   `max_body_length=20000`（飞书限制请求体 ≤ 20 KB）、`supports_headers=False`。
+10. **限制**（写进文档，不强制实现）：请求体 ≤ 20 KB；单机器人 100 次/分钟、5 次/秒。
+11. **凭据安全**：webhook URL 与 secret 都是凭据。
+    - `send()` **MUST NOT 抛出异常**（4.6 节硬不变量），全部转成失败结果。
+    - **`error_reason` 与日志中 MUST NOT 出现 webhook_url 或 secret**；异常一律经
+      `redact_exception(exc, secrets)` 处理。
+    - 注意飞书的 token 在 **URL 路径末段**而非 query 参数。**原先此处写的
+      「query 提取覆盖不到它，但裸 token 只会在有代码主动打印它时泄漏」是错的，已证伪**：
+      平台只要在业务错误 `msg` 里**回显裸 token**（如
+      `{"code":9499,"msg":"invalid webhook token: <token>"}`），token 就会明文进入
+      `error_reason` → `DeliveryRecord` → `GET /api/v1/messages/{id}` 与日志，
+      **完全不需要我们的代码打印任何东西**。这与首轮 webhook 的 query-token P1 同型，
+      只是 token 从 query 移到了 path、绕过了当时的防护。
+    - **修复**：`extract_url_secrets` 已增加**路径片段提取**（见第 6 节 M1 第 2 段，
+      阈值 `path_min_length=16`）。因此生产装配下 `credential_values` 会把路径 token
+      也作为**独立密钥**加入，`redact_text` 才能在任意文本里掩码它。
+    - 本模块**仍然不得**打印 webhook_url 或 secret（纵深防御，不因为上游修好了就放松）。
+12. 沿用偏差 D-9：`httpx` logger 已由 `webhook.py` 在导入时压到 `WARNING`，
+    本模块**不得**重复设置（避免两处各自维护同一策略）。
+
+**配置示例（冻结，M9 文档引用它）**
+```yaml
+# 形态一：不用加签——只声明 url
+- id: feishu
+  type: feishu
+  enabled: true
+  params: { timeout: 10 }
+  credentials: { url: NOTIFY_FEISHU_WEBHOOK_URL }
+
+# 形态二：启用加签——url 与 secret 都要声明，两个环境变量都必须设置
+- id: feishu
+  type: feishu
+  enabled: true
+  params: { timeout: 10 }
+  credentials: { url: NOTIFY_FEISHU_WEBHOOK_URL, secret: NOTIFY_FEISHU_SECRET }
+```
+**不要**写 `credentials: { url: X, secret: null }`——声明了 secret 却解析不出值会让整个渠道
+被判为不可用（M4 的 `credentials_complete` 语义）。
+
+#### 4. 验证方法
+
+测试文件：`tests/test_notifiers_feishu.py`；
+命令：`.venv/bin/python -m pytest tests/test_notifiers_feishu.py`。
+全部经 `httpx.MockTransport`，**不得访问真实外网**。
+
+必须覆盖的可观察结果：
+1. **纯函数签名正确性**（用官方文档给出的样例向量固定）：
+   `sign_feishu(1599360473, "demo")` 的输出必须等于用文档算法独立算出的 base64 字符串
+   （测试内用 `hmac`+`base64` 现算一遍作为期望值，并**额外硬编码**一个已知结果防算法被改坏）。
+2. **请求体形状**：捕获实际发出的 JSON，断言 `msg_type == "text"`、
+   `content` 是**嵌套 dict** 且 `content["text"]` 含标题与来源；断言**顶层不存在** `title`/`body` 等平铺键。
+3. **不加签时**：顶层**不含** `timestamp`/`sign` 键。
+4. **加签时（关键坑）**：
+   - `timestamp` 与 `sign` 出现在 **JSON body 顶层**；
+   - 请求 **URL 的 query 里没有** `timestamp`/`sign`（断言 `request.url.query` 为空或不含这两个键）；
+   - 用固定的 `ManualClock` 冻结时间，断言 `timestamp == str(int(冻结时刻的时间戳))`（**秒**，不是毫秒），
+     且 `sign == sign_feishu(int(timestamp), secret)`。
+5. **成功**：`200 {"code":0,"msg":"success","data":{}}` → `ok is True`，`receipt == "success"`。
+6. **HTTP 200 但业务失败**：`200 {"code":19024,"msg":"Key Words Not Found"}` → `ok is False`，
+   `error_reason` 含 `Key Words Not Found`。
+7. **验签失败**：`200 {"code":19021,"msg":"sign match fail or timestamp is not within one hour from current time"}`
+   → `ok is False`，`error_reason` 含 `sign match fail`。
+8. **HTTP 非 2xx**：`500` → `ok is False`，`error_reason` 含 `500`。
+9. **响应体非 JSON**：`200` + `<html>` → 按 HTTP 状态判定为**成功**，且 `receipt` 非空。
+10. **网络异常不外抛**：`MockTransport` 抛 `httpx.ConnectError` → 返回失败结果而非抛异常。
+11. **凭据不泄漏（安全关键）—— 三个子项都要**
+    a. **平台回显裸路径 token（P1 第二次的回归闸门，必须覆盖）**：
+       `webhook_url` 的路径末段放一个 ≥16 字符的可辨识 token（如
+       `…/hook/FSECRETTOKEN1234567890`），令平台返回
+       **`200 {"code":9499,"msg":"invalid webhook token: FSECRETTOKEN1234567890"}`**
+       （即 msg 里**只回显裸 token、不含完整 URL**），
+       `secrets` **必须按生产装配形态构造**——经 `credential_values(settings)` 得到
+       （settings 由 `load_settings` + `env={"NOTIFY_FEISHU_WEBHOOK_URL": "<该 URL>"}` 构造），
+       **不得**手工写 `secrets=("<token>",)`。
+       断言：token 不在 `error_reason`、不在 `caplog.text`、不在落库的
+       `DeliveryRecord.error_reason`。
+       **正控**：先断言 `"invalid webhook token"` 确实流进了 `error_reason`
+       （否则「不含」可能因为前置条件没触发而假通过），且 `caplog.records` 非空。
+    b. **平台回显完整 URL**：msg 含完整 URL 时，`error_reason` 与 `caplog` 均不含该 URL。
+    c. **异常路径**：transport 抛一个消息里含完整 URL 的 `ConnectError` →
+       `error_reason` 与 `caplog` 均不含该 URL（依赖 `credential_values` 把完整 URL 作为密钥）。
+12. **可被注册表按配置构造**：`NOTIFIER_FACTORIES["feishu"]` 存在。分三种形态：
+    - **不用加签（只声明 url）**：`credentials={"url": "<已解析的地址>"}` →
+      `"fs" in registry.ids()` 且 `registry.get("fs").channel_id == "fs"`；
+    - **用加签（url 与 secret 都已声明且都已解析）**：两个值都非空 → 渠道可用；
+    - **url 未解析**（值为 `None`）→ 进 `unavailable_reasons`，原因为「凭据缺失」。
+
+    **规格更正（原第 12 条的示例写错了）**：原文写的
+    `credentials={"url": "<已解析>", "secret": None}` 并期望「渠道可用」，这与 M4 冻结的
+    `credentials_complete`（**任一已声明的凭据为 None 即渠道不可用**）直接矛盾。
+    **正确做法是：不用加签时就不要声明 `secret` 这个键**，而不是声明它却留空。
+    这不是绕过约束——「声明了 secret 却拿不到它的值」意味着你本来打算加签但凭据没配好，
+    此时把渠道标记为不可用并降级，正是 M4 要的语义。配置示例见第 6 节 M10 第 3 段末尾。
+13. **协议自检**：`isinstance(FeishuNotifier(...), Notifier)` 成立。
+
+**至少 2 个异常场景**：(a) 第 7 条验签失败；(b) 第 10 条网络异常不外抛。
+
+**完成后必须成立**：命令全绿；`grep -rn "open.feishu.cn" tests/test_notifiers_feishu.py`
+只出现在构造的 URL 常量中，测试不发起真实网络请求。
+
+---
+
 ## 7. 阶段 D 集成测试（`subagent_verify` 作用域 2）
 
 **文件边界**：`tests/test_integration.py`、`tests/test_e2e.py`（不属于任何模块）。
@@ -2060,6 +2283,8 @@ token 以明文写入 `DeliveryRecord.error_reason`，并经 `GET /api/v1/messag
 
 **修复（用户裁定方案 A：修在源头）**：
 - 新增 `redact.py::extract_url_secrets(url, *, min_length=6)`，提取 URL 内嵌凭据成分。
+  （**该签名在第二次 P1 后扩展为 `(url, *, min_length=6, path_min_length=16)`**，
+  增加了路径片段提取；见本节末尾「第二次 P1」与第 6 节 M1 第 2 段。）
 - `credential_values()` 对 URL 形态的凭据值做**展开**，把内嵌成分作为独立密钥加入。
 - 补两条回归闸门：M1 第 4 段第 5/5b 条，M4 第 4 段第 **13b** 条（**必须经
   `credential_values()` 构造 secrets，禁止手工写裸 token**）。
@@ -2070,6 +2295,42 @@ token 以明文写入 `DeliveryRecord.error_reason`，并经 `GET /api/v1/messag
 
 **教训（对后续模块）**：安全类断言必须用**生产装配的真实数据形态**构造输入
 （走 `load_config → credential_values`），不得手工拼一个「看起来对」的形态。
+
+### 9.3 第二次 P1 与第三次同类形态：从「修实例」改为「修类别」
+
+**第二次 P1（路径 token）**：第一次修复只覆盖了 **query** 形态。随后发现飞书 / Slack / Discord
+的凭据在 **URL 路径末段**，`extract_url_secrets` 提取不到 → 平台回显裸 token 时同样明文落库。
+**同一个类别的缺陷换了向量重现。**
+
+根因之一是规格里一句**未经证伪的断言**：第 6 节 M10 第 3 段原写「裸 token 只会在有代码主动
+打印它时泄漏」。该断言是错的——**平台在错误 `msg` 里回显它就足够了**。它当时让测试作者把
+「平台回显裸 token」判为「故意不测」。**规格里一句听起来合理的错误理由，会同时让实现者、
+测试作者和后续审查者一起走偏。**
+
+**第三次同类形态（调用方纪律）**：修完路径提取后端到端闸门仍红——测试直接构造适配器时
+**没传 `secrets`**，适配器自己那条 WARNING 就把裸 token 写进日志。生产路径是传的、不泄漏，
+但这说明**不变量依赖调用方是否记得传参**。
+
+**最终裁定（第 4.6 节新增的不变量）**：适配器若自身持有 URL 形态凭据，**MUST 从该 URL 派生密钥
+并与注入的 `secrets` 合并**，使「凭据不出现在 error_reason/日志」**由构造保证**。
+`WebhookNotifier` 与 `FeishuNotifier` 均已实现（逐一核查过每个脱敏调用点，无一处仍用构造参数）。
+
+**为什么前两次不够**：修复落点都是**某个调用点**，而调用点会随适配器数量增长。
+第三次把责任放回**持有凭据的那个对象**——它手里本来就有 URL，不需要任何人提醒。
+
+**已接受的一处取舍（路径启发式的假阳性，经审查实测确认）**：
+现状规则是「路径段长度 ≥16 且仅由 `[A-Za-z0-9_-]` 组成」。
+实测真实 token 长度：飞书 32、Slack 24、Discord 17-19 + 68，均落在覆盖侧；
+`/status`、`/api/v1/messages`、`/healthz`、`/todos` 均不误伤。
+**反例**：`https://h/notificationdelivery` 这类「≥16 字符的纯字母描述性路径段」会被当成密钥。
+
+**审查者建议进一步收紧（要求片段含数字或大小写混合），架构师决定不采纳**，理由：
+收紧会让**假阳性减少但漏检风险上升**；而我们**没有真实平台 token 字符集的证据**
+（飞书文档的示例是 `xxxxxxxxxxxxxxxxx` 全小写形态）。若某个平台的 token 恰好全小写，
+收紧后会**静默停止掩码**——用「日志可读性」这一外观问题，去换「凭据可能泄漏」这一安全问题，
+方向是反的。**假阳性的代价只是某些长路径词在日志里被打成 `***`，可接受；**
+真实 webhook 平台用的都是不透明 token，实际触发概率极低。
+若将来确要收紧，必须先拿到各平台真实 token 的字符集证据。
 
 ---
 
