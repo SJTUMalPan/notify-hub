@@ -19,12 +19,14 @@ from .base import (
     Notifier,
 )
 from .email import EmailNotifier, build_email_notifier
+from .feishu import build_feishu_notifier
 from .registry import NOTIFIER_FACTORIES, NotifierRegistry
 from .webhook import WebhookNotifier, build_webhook_notifier
 
 #: 内置适配器工厂注册（key = ``ChannelSpec.type``）。
 NOTIFIER_FACTORIES["webhook"] = build_webhook_notifier
 NOTIFIER_FACTORIES["email"] = build_email_notifier
+NOTIFIER_FACTORIES["feishu"] = build_feishu_notifier
 
 __all__ = [
     "ChannelCapabilities",
