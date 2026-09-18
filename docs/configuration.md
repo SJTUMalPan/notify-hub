@@ -34,8 +34,8 @@ rules:
   poll_interval_seconds: 5
 reminders:
   scan_interval_seconds: 60
-  first_reminder_after_seconds: 1800
-  reminder_interval_seconds: 3600
+  first_reminder_after_seconds: 28800
+  reminder_interval_seconds: 28800
 default_channel: webhook
 channels:
   - id: webhook
@@ -111,11 +111,11 @@ SQLite 数据库文件路径。**必填**；相对路径按配置文件所在目
 
 ### reminders.first_reminder_after_seconds
 
-待办创建后首次提醒的延迟（秒），缺省 `1800`。必须是数字。
+待办创建后首次提醒的延迟（秒），缺省 `28800`（8 小时）。必须是数字。
 
 ### reminders.reminder_interval_seconds
 
-首次提醒之后每次提醒的间隔（秒），缺省 `3600`。必须是数字。
+首次提醒之后每次提醒的间隔（秒），缺省 `28800`（8 小时）。必须是数字。
 
 **三者关系与非法组合**：`scan_interval_seconds` 必须不大于
 `first_reminder_after_seconds`，也必须不大于 `reminder_interval_seconds`；

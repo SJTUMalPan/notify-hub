@@ -14,8 +14,8 @@ rules:
   poll_interval_seconds: 5
 reminders:
   scan_interval_seconds: 60
-  first_reminder_after_seconds: 1800
-  reminder_interval_seconds: 3600
+  first_reminder_after_seconds: 28800
+  reminder_interval_seconds: 28800
 default_channel: webhook
 channels:
   - id: webhook

@@ -53,8 +53,8 @@ class ReminderSettings:
     """超时提醒参数（合法关系在 :func:`load_settings` 中校验）。"""
 
     scan_interval_seconds: float = 60.0
-    first_reminder_after_seconds: float = 1800.0
-    reminder_interval_seconds: float = 3600.0
+    first_reminder_after_seconds: float = 28800.0
+    reminder_interval_seconds: float = 28800.0
 
 
 @dataclass(frozen=True)

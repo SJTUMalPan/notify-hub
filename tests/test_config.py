@@ -612,8 +612,8 @@ def test_dataclass_defaults_match_spec() -> None:
 
     reminders = ReminderSettings()
     assert reminders.scan_interval_seconds == 60.0
-    assert reminders.first_reminder_after_seconds == 1800.0
-    assert reminders.reminder_interval_seconds == 3600.0
+    assert reminders.first_reminder_after_seconds == 28800.0
+    assert reminders.reminder_interval_seconds == 28800.0
 
     fields = Settings.__dataclass_fields__
     assert fields["rules_poll_interval_seconds"].default == 5.0

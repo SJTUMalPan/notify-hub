@@ -33,7 +33,7 @@ from notify_hub.clock import as_utc
 from notify_hub.config import load_settings
 from notify_hub.context import build_context
 
-#: 提醒间隔已按 tasks 9.5 缩短（默认 1800/3600），以便用时钟推进而非真实等待触发提醒。
+#: 提醒间隔已按 tasks 9.5 缩短（默认 28800/28800），以便用时钟推进而非真实等待触发提醒。
 _SHORTENED_REMINDERS = {
     "scan_interval_seconds": 1,
     "first_reminder_after_seconds": 2,
