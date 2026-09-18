@@ -40,6 +40,9 @@ SENSITIVE_KEYS = (
 #: 匹配 query 中的 ``key=value`` 片段，保留原分隔符与顺序（不重新编码）。
 _QUERY_PAIR_RE = re.compile(r"(^|&)([^=&]*)=([^&]*)")
 
+#: 路径片段只有在**整段**形如不透明令牌时才可被当作密钥（仅 ``[A-Za-z0-9_-]``）。
+_PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]+")
+
 
 def _is_sensitive_key(key: str) -> bool:
     """键名命中敏感集合（大小写不敏感，含后缀匹配，如 ``access_token``）。"""
@@ -110,17 +113,29 @@ def redact_url(url: str, secrets: Iterable[str] = ()) -> str:
     return redact_text(rebuilt, secrets)
 
 
-def extract_url_secrets(url: str, *, min_length: int = 6) -> tuple[str, ...]:
+def extract_url_secrets(
+    url: str, *, min_length: int = 6, path_min_length: int = 16
+) -> tuple[str, ...]:
     """提取 URL 中应被视为**独立密钥**的成分（供 ``credential_values`` 展开用）。
 
-    提取两处：query 中键名命中 :data:`SENSITIVE_KEYS` 的值（大小写不敏感、含后缀匹配），
-    以及 userinfo 的密码部分。判定「是否是 URL」以 ``urlsplit(url).scheme`` 非空为准：
-    裸 query 串（如 ``"?ACCESS_TOKEN=abcdefgh"``）不是 URL，返回空元组，不抛异常。
+    提取三处：query 中键名命中 :data:`SENSITIVE_KEYS` 的值（大小写不敏感、含后缀匹配）、
+    userinfo 的密码部分，以及**路径中每一段**满足「长度 ≥ ``path_min_length`` 且仅由
+    ``[A-Za-z0-9_-]`` 组成」的片段（按百分号解码前的原样判断；空段与 ``/`` 不算片段）。
+    判定「是否是 URL」以 ``urlsplit(url).scheme`` 非空为准：裸 query 串
+    （如 ``"?ACCESS_TOKEN=abcdefgh"``）不是 URL，返回空元组，不抛异常。
 
-    ``min_length`` 是刻意的安全阀：``SENSITIVE_KEYS`` 含通用键名 ``key``，若把
+    ``min_length=6`` 是刻意的安全阀：``SENSITIVE_KEYS`` 含通用键名 ``key``，若把
     ``?key=1`` 的值 ``"1"`` 收进全局密钥集合，``redact_text`` 会把日志里所有出现的
     ``1`` 都打成 :data:`MASK`。长度不足的成分不进入全局密钥集合（它们仍由
-    :func:`redact_url` 在 URL 内部按键名掩码，因此不会暴露）。结果去重、剔除空串。
+    :func:`redact_url` 在 URL 内部按键名掩码，因此不会暴露）。
+
+    ``path_min_length=16`` 是更高的一道安全阀，理由同上但更严：很多平台把凭据放在
+    **URL 路径末段**而不是 query——飞书 ``…/hook/<token>``、Slack ``…/services/T/B/<token>``、
+    Discord ``/api/webhooks/<id>/<token>``。这些片段普遍 ≥ 24 字符，而普通路径段
+    （``status``、``api``、``hook``、``send``）都很短。若沿用 6 的门槛，
+    ``https://h/status`` 会把 ``status`` 收进全局密钥集合，把日志里所有 ``status``
+    打成 :data:`MASK`。取 16 在「覆盖真实 token」与「不误伤普通路径」之间取安全的一侧；
+    字符集限制同理：只收形如不透明令牌的片段。结果去重、剔除空串。
     """
     raw = "" if url is None else str(url)
     try:
@@ -144,6 +159,15 @@ def extract_url_secrets(url: str, *, min_length: int = 6) -> tuple[str, ...]:
         key, value = match.group(2), match.group(3)
         if _is_sensitive_key(key) and value and len(value) >= min_length:
             found.setdefault(value, None)
+
+    # 路径末段凭据：平台把 webhook token 放在路径里（飞书/Slack/Discord），
+    # 平台错误 msg 回显的是裸 token，必须作为独立密钥才能被 redact_text 匹配。
+    for segment in parts.path.split("/"):
+        if (
+            len(segment) >= path_min_length
+            and _PATH_TOKEN_RE.fullmatch(segment)
+        ):
+            found.setdefault(segment, None)
 
     return tuple(found)
 

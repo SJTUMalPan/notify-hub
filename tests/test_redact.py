@@ -219,6 +219,78 @@ def test_extract_url_secrets_deduplicates_and_drops_empty_values() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 第 4 段 5b 末条：路径末段 token 提取（**第二次同类 P1 泄漏**的回归点）
+#
+# 飞书/Slack/Discord 把 webhook 凭据放在 URL 路径末段而非 query。若只提 query 与 userinfo，
+# 平台在业务错误 msg 里回显的裸 token 就匹配不上（secrets 里只有完整 URL），明文经
+# error_reason → 投递记录 → 查询接口/日志外泄。阈值 path_min_length=16 见 M1 第 2 段。
+# --------------------------------------------------------------------------- #
+def test_extract_url_secrets_from_feishu_style_path_token() -> None:
+    """飞书形态：凭据在路径末段 ``/hook/<token>``，必须被提取为独立密钥。"""
+    from notify_hub.redact import extract_url_secrets
+
+    token = "FSECRETTOKEN1234567890"
+
+    found = extract_url_secrets(f"https://open.feishu.cn/open-apis/bot/v2/hook/{token}")
+
+    assert token in found
+
+
+def test_extract_url_secrets_from_slack_style_path_token() -> None:
+    """Slack 形态：``/services/T.../B.../<token>`` 的末段必须被提取（≥16）。"""
+    from notify_hub.redact import extract_url_secrets
+
+    token = "XXXXXXXXXXXXXXXXXXXXXXXX"
+
+    found = extract_url_secrets(
+        f"https://hooks.slack.com/services/T00000000/B00000000/{token}"
+    )
+
+    assert token in found
+
+
+def test_extract_url_secrets_path_safety_valve_excludes_ordinary_segment() -> None:
+    """安全阀必须生效：``https://h/status`` → 空元组。
+
+    9 字符的 ``status`` 若进入全局密钥集合，``redact_text`` 会把日志里**所有** ``status``
+    打成 ``***``（同 ``?key=1`` 的理由）。阈值 16 是刻意取的更严一侧。
+    """
+    from notify_hub.redact import extract_url_secrets
+
+    found = extract_url_secrets("https://h/status")
+
+    assert isinstance(found, tuple)
+    assert found == ()
+
+
+def test_extract_url_secrets_path_requires_token_charset() -> None:
+    """字符集限制：仅收形如不透明令牌（``[A-Za-z0-9_-]``）的片段。
+
+    ``/aaaa.bbbb.cccc.dddd`` 被 ``.`` 切分成多个短片段，全部落入长度门槛之下，不得提取。
+    """
+    from notify_hub.redact import extract_url_secrets
+
+    found = extract_url_secrets("https://h/aaaa.bbbb.cccc.dddd")
+
+    assert isinstance(found, tuple)
+    assert found == ()
+
+
+def test_extract_url_secrets_path_threshold_boundary_is_inclusive() -> None:
+    """阈值是「≥ ``path_min_length``」：长度 16 的片段被提取，长度 15 的不被提取。"""
+    from notify_hub.redact import extract_url_secrets
+
+    at_threshold = "A" * 16
+    below_threshold = "B" * 15
+
+    found_at = extract_url_secrets(f"https://h/{at_threshold}")
+    found_below = extract_url_secrets(f"https://h/{below_threshold}")
+
+    assert at_threshold in found_at
+    assert below_threshold not in found_below
+
+
+# --------------------------------------------------------------------------- #
 # 第 4 段 7：日志端到端脱敏（tasks 1.2 / 9.6 的服务端一半）
 # --------------------------------------------------------------------------- #
 def test_setup_logging_redacts_secret_end_to_end(caplog) -> None:
