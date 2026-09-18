@@ -326,18 +326,26 @@ class Notifier(Protocol):
 
 ## 5. 模块清单、批次与预算
 
-> **已批准的开工范围（2026 用户裁定）**：**先做 6 个核心模块 M1 / M2 / M3 / M4 / M6 / M7**
-> （≈24 次派发），跑完阶段 B 后向用户汇报，再由用户决定 M5（CLI）/ M8（Web）/ M9（文档）。
-> 偏差 D-1（进程内队列替代 `BackgroundTasks`）已获用户认可。
+> **已批准的开工范围**：**全部 9 个模块**。
+> 第一批（6 个核心模块 M1 / M2 / M3 / M4 / M6 / M7）已实现、通过审查并上库；随后用户批准
+> 继续完成 **M5（CLI）/ M8（Web）/ M9（文档）**，以补齐尚存的权威规格需求
+> （`message-ingest` 的命令行投递入口、`todo-tracking` 的「完成入口须 Web + CLI 两个渠道」
+> 与待办列表/详情/审计页面）。
 >
-> **由此产生的两处临时状态**（批准 M8/M5 后由架构师解除，模块不得自行处理）：
-> 1. `src/notify_hub/app.py` 当前**不挂载 web 路由**（M8 未实施）。批准 M8 后由架构师在
->    `create_app()` 中加入 `app.include_router(create_web_router(ctx))` 一行。
->    **禁止**为了让 `app.py` 能跑而写 `try/except ImportError` 之类的静默降级。
-> 2. `pyproject.toml` 的 `[project.scripts] notify` 指向尚未实现的 `notify_hub.cli:main`。
->    这不影响安装与测试；批准 M5 后自然生效。
+> 偏差 D-1（进程内队列替代 `BackgroundTasks`）已获用户认可；偏差 D-9 已由审查者评估为可接受。
 >
-> M8 的模块规格（第 6 节）与 M9 的文档契约保持原样冻结，批准后直接按 A→B 执行，无需重新设计。
+> **M8 落地后的唯一收尾动作（架构师执行，模块不得自行处理）**：
+> `src/notify_hub/app.py` 当前**不挂载 web 路由**（M8 尚未实施）。M8 实现完成后，由**架构师**
+> 在 `create_app()` 中加入一行：
+> ```python
+> from notify_hub.web import create_web_router
+> ...
+> app.include_router(create_web_router(ctx))
+> ```
+> **冻结契约**：M8 必须导出 `notify_hub.web.create_web_router(ctx: AppContext) -> APIRouter`。
+> **禁止**任何模块为了让 `app.py` 跑通而写 `try/except ImportError` 之类的静默降级，
+> 也**禁止**模块修改 `app.py`（属架构师所有的阶段 0 共享文件）。
+> 在该行加入之前，Web 页面只能经 `create_web_app(ctx)` 测试访问，属预期状态。
 
 | # | 模块 | 实现路径（`subagent_dev`） | 测试路径（`subagent_verify`） | 依赖 | 批次 |
 |---|---|---|---|---|---|
@@ -1270,6 +1278,13 @@ notify todo done TODO_ID [--endpoint URL]
 
 - 依赖：`typer`、`httpx`、标准库。**禁止**导入本项目其它模块（`notify_hub.domain` 等一律不用，
   级别取值用字面量校验交给服务端——但可用 `Enum` 在点击层限制取值）。
+- **禁止任何客户端侧的请求体校验（裁定，勿自行发挥）**：除 click 自身的「必填选项」
+  与「选项取值枚举」约束外，CLI **不得**对 `source`/`title` 做空串、长度或格式检查，
+  必须原样发出去由服务端裁决。理由：spec `message-ingest` 明确要求 CLI
+  「MUST 通过 HTTP 接口投递，不得绕过接入层的校验与记录逻辑」。
+  **推论**：要触发服务端的 422，就用一个服务端会拒但 click 会放行的请求
+  （典型是 `--source ""`）；「缺 `--source`」由 click 直接拦成退出码 2，**根本发不出请求**，
+  两者是不同的失败路径，不要混为一谈。
 - `main()` 捕获 `typer.Exit` 与自身定义的 `CliError(code, message)`；写 stderr 后 `sys.exit(code)`。
 - 响应解析：成功投递读 `resp.json()["message_id"]`；`todo list` 读
   `resp.json()["todos"]`（字段见 M7 的 `TodoOut`）。字段缺失时按「服务端返回格式无法识别」
@@ -1295,8 +1310,11 @@ notify todo done TODO_ID [--endpoint URL]
 4. **服务不可达**（tasks 8.2）：`build_client` 返回的 Client 其 transport 抛
    `httpx.ConnectError` → `exit_code == 3`，stderr 含「无法连接」。
 5. **用法错误**：`notify --title x`（缺 `--source`）→ `exit_code == 2`。
-6. **todo list**（tasks 8.3）：stub 返回 3 条 `todos`（`overdue_seconds` 分别 3600 / 18000 / 1200，
-   **服务端已排序**）→ `exit_code == 0`，stdout 的 3 行顺序为 18000 / 3600 / 1200 对应的 id。
+6. **todo list**（tasks 8.3）：stub 返回的 `todos` 数组**已由服务端按 `overdue_seconds` 降序排好**
+   （即元素的 `overdue_seconds` 依次为 18000 / 3600 / 1200，**数组顺序就是这个顺序**）→
+   `exit_code == 0`，且 stdout 的 3 行**保持服务端给的顺序**（18000 的排最前）。
+   CLI **不做也不得做重新排序**——排序是服务端的职责（M7 规格已冻结）。
+   （原文把「列举的三个值」与「数组顺序」写混了，导致 3600 出现在 18000 之前看似矛盾；此处已澄清。）
 7. **todo done**（tasks 8.3）：stub 返回 `200 {"status": "completed"}` → `exit_code == 0`，
    stdout 含 `done`。
 8. **todo done 不存在**（tasks 8.3）：stub 返回 `404` → `exit_code == 1`，stderr 含可读原因。
@@ -1803,9 +1821,18 @@ TEMPLATES_DIR: Path    # = Path(__file__).parent / "templates"
   `base.html`、`todos_list.html`、`todo_detail.html`、`messages_list.html`、`message_detail.html`。
 - 「完成」用 HTML `<form method="post" action="/todos/{id}/done">` + `<button>`；
   路由用 `Form`/无体 POST 均可（`python-multipart` 已在依赖中）。
-- 超时时长格式化：本模块内实现一个小函数，**不得**导入 M6 的 `services.notifications`（避免
-  web → services 的全量依赖；只用 `TodoView` 的数据）。
-  说明：这条限制是为了让 M8 与 M7 在同一批次内不互相阻塞；只依赖 `AppContext` 与 `TodoView`。
+- **超时时长格式化：必须复用 `notify_hub.services.notifications.format_duration`**，
+  **不得**在 web 层再实现一份。
+  说明：最初写的是「本模块自实现、不得导入 M6」，理由是让 M8 与 M7 同批次并行时不互相阻塞；
+  该理由在 M6 早已落地后已不成立，而维持禁令会让同一段**用户可见文案**出现两份实现、
+  两个事实来源（提醒文案里用的是 M6 那份）。M8 本来就经 `ctx` 使用 M6 的 service，
+  再引入一个纯函数不存在方向问题。
+- **`format_duration` 的输出格式（冻结，与 M6 一致）**：单位 `天/小时/分钟/秒`、空格分隔、
+  **只展开非零单位**；全零时为 `0 秒`。样例：`59 -> "59 秒"`、`60 -> "1 分钟"`、
+  `1200 -> "20 分钟"`、`3661 -> "1 小时 1 分钟 1 秒"`、`90000 -> "1 天 1 小时"`。
+  页面上的超时时长必须长这个样子——**不是** `1d2h3m4s` 那种紧凑格式（那是 M5 CLI 的内部选择）。
+- **时间文本格式（冻结）**：消息与待办的时刻以 `YYYY-MM-DD HH:MM:SS` 渲染，**UTC、去微秒**。
+  （M8 的测试对多种写法宽容，但实现请只产出这一种，避免同一页面出现多种时间风格。）
 - 依赖：M6 的 `TodoService`/`MessageService`（经 `ctx`）、阶段 0。**禁止**导入 M7 的 `api`/`pipeline`。
 - 模板目录必须可通过 `importlib.resources`/`__file__` 定位，不依赖 cwd。
 
@@ -1823,6 +1850,10 @@ TEMPLATES_DIR: Path    # = Path(__file__).parent / "templates"
 4. **完成操作**（tasks 7.2）：`POST /todos/{id}/done` → 状态码 303 且 `Location` 指向 `/todos`；
    随后 `GET /todos` 不含该标题；再次 `GET /todos/{id}` 仍显示已完成（断言 `ctx.todos.get(id).status`
    为 `done`，且页面含「已完成」字样）。
+   **观察重定向的方式（冻结，否则这条测不了）**：httpx 的 `TestClient` **默认
+   `follow_redirects=True`**，会自动跟随 303 并返回 200，**因此用默认客户端根本观察不到 303**。
+   必须二选一：测试客户端以 `follow_redirects=False` 构造，或断言
+   `response.history[0].status_code == 303`。此点已在实现阶段被实际踩到（同一坑影响 GET `/` 那条）。
 5. **详情时间序列**（tasks 7.3）：构造「创建 → 2 次提醒 → 完成」（经 `ctx` 直接调 service 与
    `clock.advance`）→ `GET /todos/{id}` 中 4 个事件的文本按时间顺序出现（断言
    `created` 文案的 index < 第 1 次提醒 < 第 2 次提醒 < 完成），且页面含渠道 id 与投递结果。
@@ -1830,8 +1861,17 @@ TEMPLATES_DIR: Path    # = Path(__file__).parent / "templates"
 7. **消息页**（tasks 7.4）：`GET /messages` 列出消息；`GET /messages/{id}` 含分类结果
    （`rule_id`、`category`、标签）与实际使用的渠道 id。
 8. **XSS 转义（安全关键）**：投递一条 `title="<script>alert(1)</script>"` 的消息并使其入待办 →
-   `GET /todos` 与 `GET /todos/{id}` 的 HTML 中**不含** `<script>alert(1)</script>`，而含
-   `&lt;script&gt;`。
+   `GET /todos` 与 `GET /todos/{id}` 的 HTML 中**不含**原始串 `<script>alert(1)</script>`，而含
+   转义后的 `&lt;script&gt;`（以及 `&lt;/script&gt;`）。
+   **只允许这两类断言**：
+   - **否定式**：原始串不在 HTML 中；
+   - **肯定式**：转义形态在 HTML 中。
+   **绝对禁止**断言「原始串出现在 HTML 中」——那与 spec「必须转义、禁止 `|safe`/`Markup`」
+     直接相反，若为了让它通过而动实现，唯一结果就是**关掉转义、制造安全回归**。
+     该错误在实现阶段被实际写进过测试（把「待办确实出现在列表页」的前置检查误写成
+     `assert RAW_SCRIPT in html`），开发子代理正确地拒绝改实现并上报；
+     前置检查应改为断言**转义形态**或**待办 id** 出现在页面中。
+   `grep -rn "|safe" src/notify_hub/web/` 必须无输出。
 9. **404**：`GET /todos/99999` → 404；`POST /todos/99999/done` → 404。
 10. **根路径**：`GET /` → 303 且 `Location` 以 `/todos` 结尾。
 
@@ -1893,10 +1933,18 @@ TEMPLATES_DIR: Path    # = Path(__file__).parent / "templates"
    `isinstance(cls(...), Notifier)`（`runtime_checkable` Protocol）成立，且
    `cls(...).send(msg)` 返回 `DeliveryResult`；再把它 `register()` 进 `NotifierRegistry`，
    断言 `"dummy" in registry.ids()`——**且全程未修改 api/classifier 的任何文件**。
-4. **README 命令面**（tasks 10.1）：提取 `README.md` 中所有 `notify ...` 行，断言其中出现的
-   每个长选项名（`--source`、`--title`、`--body`、`--body-stdin`、`--level`、`--need-ack`、
-   `--dedup-key`、`--endpoint`）都出现在 `typer` 的
-   `notify_hub.cli.app` 的已注册参数名集合中（通过 `CliRunner().invoke(app, ["--help"])` 的输出断言）。
+4. **README 命令面**（tasks 10.1）：提取 `README.md` 中以 `notify` 开头的命令行，取出其中出现的
+   **长选项名**，断言每个都出现在 `CliRunner().invoke(notify_hub.cli.app, ["--help"])` 的输出中
+   ——即「文档里写的选项**真实存在**」。
+
+   **不得执行 README 里的命令行（冻结，勿自行发挥）**：它们会真的发起 HTTP 请求，离线时必然以
+   M5 冻结的退出码 3（不可达）结束。把「示例是否可复制」等价于「示例能否离线跑通」，会**逼着
+   文档作者写出跑不通的伪示例**——恰好毁掉文档的全部价值。该错误已在实现阶段被实际写进过测试
+   （它执行 README 行并断言 `exit_code != 2` 且异常类型受限），文档作者正确地拒绝为迁就它而
+   改写示例，改为上报冲突。
+
+   要验证 CLI 的**行为**，请按第 6 节 M5 第 4 段的方法（`CliRunner` + monkeypatch
+   `notify_hub.cli.build_client`）——那是 **M5 的测试职责**，不是文档契约的职责。
 5. **部署安全边界**（tasks 10.4）：断言 `docs/deployment.md` 同时含「回环」或 `127.0.0.1`
    字样、`[Unit]`/`[Service]` 段、以及「不要暴露到公网」的显式警示句；断言
    `docs/deployment.md` 中的 `ExecStart` 行包含 `notify_hub`。
