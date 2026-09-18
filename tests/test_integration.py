@@ -12,8 +12,10 @@ M1–M7 之间的内部边界全部走真实实现：
 → ``DeliveryService`` → **真实 ``WebhookNotifier``（真实 socket，不使用 ``MockTransport``）**
 → ``IngestPipeline``（真实队列 + 守护线程）→ FastAPI 路由（真实 ``TestClient`` HTTP）。
 
-M5（CLI）与 M8（Web）本次未实施：涉及它们的接缝不在此文件覆盖（见测试报告 NOT-COVERED），
-「页面上点完成」以等价的生产入口 ``POST /api/v1/todos/{id}/done`` 在 test_e2e.py 中替代。
+M5（CLI）与 M8（Web）的接缝已由本轮新增的 ``tests/test_integration_cli.py``
+（CLI → 真实 uvicorn → app）与 ``tests/test_integration_web.py``
+（Web 页面 → service → DB）覆盖；``tests/test_e2e.py::test_full_lifecycle`` 的「完成」
+已从 API 端点换回列表页上的真实 Web 表单。
 """
 
 from __future__ import annotations

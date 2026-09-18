@@ -5,18 +5,20 @@
     投递 need_ack=true 消息
       → 首次通知经真实 webhook（真实 socket）送达
       → 时钟推进 + scheduler.run_once() 收到提醒
-      → 经 HTTP POST /api/v1/todos/{todo_id}/done 标记完成
+      → 在真实 Web 页面（M8）上提交列表页那个完成表单
       → 再 run_once() 不再提醒
 
-M8（Web 页面）本次未实施，因此「在页面上点完成」以**等价的生产入口**
-``POST /api/v1/todos/{todo_id}/done`` 替代——该端点就是 M8 页面表单 action 的目标路由。
+「完成」这一跳走的是**真货**：``GET /todos`` 拿到的列表页 HTML 里那个
+``<form method="post" action="/todos/{id}/done">``，直接 POST 它，并用
+``follow_redirects=False`` 观察 303（``TestClient`` 默认跟随重定向，看不到 303——见 M8 规格）。
 
-进程外打桩仅限本机 ``ThreadingHTTPServer``（webhook 接收方）；M1–M7 内部边界无替身。
+进程外打桩仅限本机 ``ThreadingHTTPServer``（webhook 接收方）；M1–M8 内部边界无替身。
 """
 
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -151,13 +153,26 @@ def _settings(tmp_path: Path, *, webhook_url: str):
     return load_settings(config_path, env={"NOTIFY_E2E_WEBHOOK_URL": webhook_url})
 
 
+def _complete_form_action(html: str, todo_id: int) -> str:
+    """从列表页 HTML 里取出真实的「完成」表单 action（不硬编码路径）。"""
+    pattern = re.compile(
+        r'<form[^>]*method="post"[^>]*action="(?P<action>[^"]*)"[^>]*>', re.IGNORECASE
+    )
+    for match in pattern.finditer(html):
+        action = match.group("action")
+        if f"/todos/{todo_id}/done" in action:
+            return action
+    raise AssertionError(f"列表页未找到待办 {todo_id} 的完成表单：{html[:2000]}")
+
+
 def test_full_lifecycle(tmp_path, webhook_stub, manual_clock):
-    """tasks 9.5：受理 → 首次通知 → 超时提醒 → 完成 → 不再提醒。"""
+    """tasks 9.5：受理 → 首次通知 → 超时提醒 → 页面上点完成 → 不再提醒。"""
     settings = _settings(tmp_path, webhook_url=webhook_stub.url)
     ctx = build_context(settings, clock=manual_clock)
     app = create_app(ctx=ctx)  # 生产装配 + lifespan 真实起停后台线程
 
-    with TestClient(app) as client:
+    # 必须显式关闭重定向跟随，才能观察到 Web「完成」表单的 303。
+    with TestClient(app, follow_redirects=False) as client:
         # --- 1. 受理一条 need_ack 消息（真实 HTTP → 分类 → 落库 → 待办 → 后台派发） ---
         accepted = client.post(
             "/api/v1/messages",
@@ -213,17 +228,25 @@ def test_full_lifecycle(tmp_path, webhook_stub, manual_clock):
             "reminder",
         ]
 
-        # --- 3. 经 HTTP 标记完成（M8 未实施，用页面表单所指的同一路由） ---
-        done = client.post(f"/api/v1/todos/{todo_id}/done")
-        assert done.status_code == 200
-        assert done.json()["status"] == "completed"
-        assert done.json()["completed_at"] is not None
+        # --- 3. 在真实 Web 页面上点「完成」（M8 列表页那个表单） ---
+        page = client.get("/todos")
+        assert page.status_code == 200
+        assert "备份失败" in page.text
+        action = _complete_form_action(page.text, todo_id)
+        assert action == f"/todos/{todo_id}/done"
+
+        done = client.post(action, data={})
+        assert done.status_code == 303, done.text[:500]
+        assert done.headers["location"].endswith("/todos")
 
         assert ctx.todos.get(todo_id).status == "done"
         assert client.get("/api/v1/todos").json()["total"] == 0  # 默认仅待完成
         done_list = client.get("/api/v1/todos?status=done").json()
         assert done_list["total"] == 1
         assert done_list["todos"][0]["id"] == todo_id
+        # 默认列表页不再显示已完成的那条
+        assert "备份失败" not in client.get("/todos").text
+        assert "已完成" in client.get(f"/todos/{todo_id}").text
 
         # --- 4. 完成后不再提醒（时钟继续前进也没有新通知） ---
         manual_clock.advance(100_000)
