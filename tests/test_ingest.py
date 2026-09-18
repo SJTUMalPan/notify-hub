@@ -1,6 +1,6 @@
 """M7 模块测试 —— HTTP 接入层与受理编排（`tests/test_ingest.py`）。
 
-覆盖 ``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M7」第 4 段
+覆盖 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M7」第 4 段
 验证方法的第 1–10、13、14 条（第 11、12 条在 ``tests/test_api_todos.py``）。
 
 阶段 A（``src/notify_hub/api/``、``src/notify_hub/pipeline.py`` 尚不存在）下本文件

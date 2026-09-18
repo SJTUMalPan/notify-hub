@@ -1,9 +1,9 @@
 """模块 M3（分类器：规则加载 / 匹配 / 热加载）的模块级测试。
 
 规格来源（写测试时的唯一依据）：
-* ``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M3」第 2/3/4 段
-* ``openspec/changes/add-notify-hub/specs/message-classification/spec.md``（权威需求）
-* ``openspec/changes/add-notify-hub/design.md`` 决策 3
+* ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M3」第 2/3/4 段
+* ``openspec/specs/message-classification/spec.md``（权威需求）
+* ``openspec/changes/archive/2026-09-18-add-notify-hub/design.md`` 决策 3
 * 共享契约：``domain.py`` / ``errors.py`` / ``clock.py``（第 4.1–4.3 节）
 
 本文件写于实现之前：``src/notify_hub/classifier/`` 与项目根 ``rules.example.yaml`` 由开发

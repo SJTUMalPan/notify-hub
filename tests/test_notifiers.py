@@ -1,7 +1,7 @@
 """M4 通知投递层 · 契约 / 注册表 / webhook / email 的模块测试。
 
 作用域：**模块测试，实现尚不存在**（阶段 A）。测试完全依据
-``openspec/changes/add-notify-hub/architecture.md`` 第 4.6 与第 6 节「模块 M4」第 4 段，
+``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 4.6 与第 6 节「模块 M4」第 4 段，
 以及 ``specs/notification-delivery/spec.md`` 编写。
 
 两条硬约束：

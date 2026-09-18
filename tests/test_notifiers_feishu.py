@@ -1,7 +1,7 @@
 """M10 飞书（Feishu / Lark）自定义机器人适配器 · 模块测试。
 
 作用域：**模块测试，实现尚不存在**（``src/notify_hub/notifiers/feishu.py`` 尚未创建）。
-测试完全依据 ``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M10」
+测试完全依据 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M10」
 （第 3 段协议要点 + 第 4 段 13 条验证规格）与第 4.3/4.6 节冻结契约编写。
 
 硬约束：

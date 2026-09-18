@@ -1,6 +1,6 @@
 """M5：命令行客户端 ``notify``。
 
-规格来源：``openspec/changes/add-notify-hub/architecture.md`` 第 6 节。
+规格来源：``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节。
 本模块是一个**独立客户端**：只依赖 ``typer`` / ``httpx`` / 标准库，不导入本项目其它模块，
 不做任何客户端侧的请求体校验（click 的必填与枚举约束除外），原样交给服务端裁决。
 """

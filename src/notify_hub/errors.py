@@ -1,7 +1,7 @@
 """notify-hub 的跨模块异常类型。
 
 **本文件由架构师维护（阶段 0 共享契约），任何模块都不得修改。**
-见 ``openspec/changes/add-notify-hub/architecture.md`` 第 3 节。
+见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 3 节。
 """
 
 from __future__ import annotations

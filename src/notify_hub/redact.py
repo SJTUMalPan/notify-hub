@@ -1,6 +1,6 @@
 """脱敏原语：把凭据从文本、URL、结构化数据与异常中抹掉。
 
-见 ``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M1」第 2 段。
+见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M1」第 2 段。
 
 安全约束：本模块的输出对同一输入是确定性的，且 **不包含任何输入 secret 的完整值**。
 ``redact_url`` 的第 1、2 条规则是**无条件**生效的——即使调用方没有传 ``secrets``，

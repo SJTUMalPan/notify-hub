@@ -4,7 +4,7 @@
 本文件 **MUST NOT** 导入任何其它 ``notify_hub`` 子模块，否则会形成导入环。
 
 **本文件由架构师维护（阶段 0 共享契约），任何模块都不得修改。**
-见 ``openspec/changes/add-notify-hub/architecture.md`` 第 4.1 节。
+见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 4.1 节。
 """
 
 from __future__ import annotations

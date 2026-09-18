@@ -1,7 +1,7 @@
 """FastAPI 应用工厂与生命周期。
 
 **本文件由架构师维护（阶段 0 共享契约），任何模块都不得修改。**
-见 ``openspec/changes/add-notify-hub/architecture.md`` 第 4.5 节。
+见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 4.5 节。
 
 生命周期顺序是有意为之的：
 - 启动：分类器（先能分类）→ 受理管道（先能收）→ 提醒调度（最后才开始提醒）

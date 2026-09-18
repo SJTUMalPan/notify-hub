@@ -1,6 +1,6 @@
 """M7 的 HTTP 请求/响应模型（字段名冻结，M5 CLI / M8 Web / 阶段 D 集成测试依赖）。
 
-见 ``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M7」第 2 段。
+见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M7」第 2 段。
 本文件不做业务逻辑，只声明契约。
 
 本文件由 M7 模块负责。

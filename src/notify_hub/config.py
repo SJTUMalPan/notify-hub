@@ -1,6 +1,6 @@
 """配置加载：把「服务怎么配、凭据从哪来」收敛到一处。
 
-见 ``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M1」第 2/3 段。
+见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M1」第 2/3 段。
 
 依赖约束：仅标准库 + ``pyyaml`` + 阶段 0 的 ``errors.ConfigurationError``，以及同属模块 M1 的
 ``redact.extract_url_secrets``。**不得**导入本项目其它模块。

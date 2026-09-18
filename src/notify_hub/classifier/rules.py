@@ -1,6 +1,6 @@
 """M3 规则模型与解析。
 
-规格：``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M3」。
+规格：``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M3」。
 本文件只依赖标准库（YAML 的解析由调用方完成），**不**导入其它模块。
 
 依赖方向：``rules.py`` <- ``engine.py`` / ``loader.py``。

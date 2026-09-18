@@ -10,7 +10,7 @@
 硬不变量：``Notifier.send()`` **MUST NOT 抛异常**——任何渠道侧/网络侧错误都必须
 转成 :meth:`DeliveryResult.failure`。
 
-本文件由 M4 模块负责，见 ``openspec/changes/add-notify-hub/architecture.md``
+本文件由 M4 模块负责，见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md``
 第 4.6 与第 6 节「模块 M4」。
 """
 

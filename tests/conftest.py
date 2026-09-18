@@ -7,7 +7,7 @@
 的导入都写在 fixture 函数体内。否则在阶段 A（模块尚未实现时）pytest 会在**收集阶段**
 失败，导致所有测试文件都跑不起来——包括测试已经写好的那些模块。
 
-见 ``openspec/changes/add-notify-hub/architecture.md`` 第 3.2 节。
+见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 3.2 节。
 """
 
 from __future__ import annotations

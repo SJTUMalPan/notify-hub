@@ -7,7 +7,7 @@
 
     from notify_hub.notifiers import NotifierRegistry
 
-本文件由 M4 模块负责，见 ``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M4」。
+本文件由 M4 模块负责，见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M4」。
 """
 
 from __future__ import annotations

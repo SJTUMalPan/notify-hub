@@ -1,6 +1,6 @@
 """待办领域服务：创建/去重、完成、列表、详情与超时判定。
 
-接口见 ``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M6」的
+接口见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M6」的
 ``services/todos.py`` 段。硬要求：
 
 - 所有从 ORM 读出的时间在参与算术前必须经 ``clock.as_utc()`` 归一化（架构 1.2 节）。

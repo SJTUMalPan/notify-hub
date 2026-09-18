@@ -1,6 +1,6 @@
 """通知文案构造与时长格式化。
 
-冻结文案见 ``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M6」：
+冻结文案见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M6」：
 
 - **首次通知**：``overdue_seconds=None``、``todo_id=None``、``title`` 不加前缀；
   正文依次含来源、分类、时间、空行、原始正文。

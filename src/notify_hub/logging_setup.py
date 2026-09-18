@@ -1,6 +1,6 @@
 """日志基础：一次性配置根 logger，并保证任何 handler 都不会输出凭据。
 
-见 ``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M1」第 2/3 段。
+见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M1」第 2/3 段。
 
 关键点：``SecretFilter`` 装在**根 logger 的每个 handler** 上（不只装在 logger 上），
 这样经由 propagation 到达的任意子 logger 记录、以及 ``caplog`` 的捕获 handler

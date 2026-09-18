@@ -1,6 +1,6 @@
 """M8 Web 待办界面：服务端渲染的列表、详情与「完成」表单。
 
-见 ``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M8」。
+见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M8」。
 
 硬约束：
 

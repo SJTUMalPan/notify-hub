@@ -1,6 +1,6 @@
 """M9「文档与部署」的**文档契约测试**（作用域 1：实现尚不存在时编写）。
 
-规格：``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M9」第 2/4 段，
+规格：``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M9」第 2/4 段，
 以及 ``tasks.md`` 10.1–10.4。
 
 这个模块的交付物是 Markdown，不是代码，所以唯一有判别力的验证方式是：**把文档里的
@@ -147,7 +147,7 @@ def _read_text(path: Path, *, what: str) -> str:
     if not path.exists():
         raise MissingDocument(
             f"{what}缺失：期望文件 {path}。该文件是 M9 的实现路径"
-            f"（openspec/changes/add-notify-hub/architecture.md 第 6 节「模块 M9」），"
+            f"（openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md 第 6 节「模块 M9」），"
             f"在开发子代理写出它之前，本条契约无法被满足——这是预期的红，不是测试写错。"
         )
     if not path.is_file():

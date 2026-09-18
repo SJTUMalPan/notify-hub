@@ -8,7 +8,7 @@
   （classifier/pipeline/scheduler 的线程是 ``create_app()`` 的 lifespan 职责）。
 - 路由通过 ``request.app.state.ctx`` 取得 :class:`AppContext`。
 
-本文件由 M7 模块负责，见 ``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M7」。
+本文件由 M7 模块负责，见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M7」。
 """
 
 from __future__ import annotations

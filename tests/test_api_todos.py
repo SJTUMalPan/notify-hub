@@ -1,6 +1,6 @@
 """M7 模块测试 —— 待办查询与完成接口（`tests/test_api_todos.py`）。
 
-覆盖 ``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M7」第 4 段
+覆盖 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M7」第 4 段
 验证方法的第 11–12 条。第 1–10、13、14 条在 ``tests/test_ingest.py``。
 
 阶段 A 下本文件必然因实现缺失而为红（fixture 装配失败），收集阶段必须成功。

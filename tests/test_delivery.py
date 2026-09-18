@@ -1,7 +1,7 @@
 """M4 通知投递层 · ``DeliveryService`` 的渠道选择 / 降级 / 投递记录 模块测试。
 
 作用域：**模块测试，实现尚不存在**（阶段 A）。依据
-``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M4」第 2 段（候选渠道顺序、
+``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M4」第 2 段（候选渠道顺序、
 降级原因文案、投递记录规则）与第 4 段第 9–14 条，以及
 ``specs/notification-delivery/spec.md`` 的「渠道注册与选择」「投递记录」「凭据管理」
 「投递失败不阻塞后续处理」。

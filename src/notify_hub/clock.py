@@ -5,7 +5,7 @@
 ``datetime`` 必然是 naive 的，直接参与算术会静默出错——所以 ``as_utc()`` 是强制的。
 
 **本文件由架构师维护（阶段 0 共享契约），任何模块都不得修改。**
-见 ``openspec/changes/add-notify-hub/architecture.md`` 第 4.3 节。
+见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 4.3 节。
 
 Python 3.10：使用 ``datetime.timezone.utc``，**不得**使用 3.11+ 的 ``datetime.UTC``。
 """

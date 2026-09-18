@@ -8,7 +8,7 @@
 - ``init_schema()`` 幂等：``create_all`` 对已存在的表是 no-op；部分唯一索引在 ``todos`` 上由
   模型层的 ``Index(...)`` 声明并随之创建。
 
-本文件由 M2 模块负责，见 ``openspec/changes/add-notify-hub/architecture.md``
+本文件由 M2 模块负责，见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md``
 第 6 节「模块 M2：数据模型与持久化」。
 """
 

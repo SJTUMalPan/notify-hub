@@ -1,6 +1,6 @@
 """M1 模块测试：配置加载、路径解析、环境变量凭据解析与错误契约。
 
-依据：``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M1」第 2/3/4 段。
+依据：``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M1」第 2/3/4 段。
 实现（``notify_hub.config``）在本阶段尚不存在，因此本文件顶部**不做**模块级导入；
 所有对实现符号的导入都写在测试函数体内（与 ``conftest.py`` 的惰性导入约定一致），
 以保证 pytest 能成功**收集**本文件、失败只发生在运行时的「实现缺失」。

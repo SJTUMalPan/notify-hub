@@ -3,7 +3,7 @@
 > 面向第一次读这个代码库的人。目标：读完你能知道**每一条消息从进来到送达，经过了哪些文件、哪些函数**。
 >
 > 配套的可视化页面：**[`architecture-map.html`](./architecture-map.html)**（纯前端单文件，双击即可打开，无需服务器）。
-> 契约级规格（接口签名、不变量、偏差记录）在 `../openspec/changes/add-notify-hub/architecture.md`。
+> 契约级规格（接口签名、不变量、偏差记录）在 `../openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`。
 
 ---
 

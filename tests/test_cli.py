@@ -1,6 +1,6 @@
 """M5 命令行客户端（``notify``）的模块测试。
 
-规格来源：``openspec/changes/add-notify-hub/architecture.md``
+规格来源：``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md``
 第 6 节「模块 M5：命令行客户端」第 2 段（冻结命令面 / 退出码 0-1-2-3 / 输出契约）
 与第 4 段（测试规格第 1–10 条）。
 

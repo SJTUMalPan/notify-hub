@@ -1,6 +1,6 @@
 """消息领域服务：把受理草稿 + 分类结论落库，并提供只读查询。
 
-接口见 ``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M6」的
+接口见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M6」的
 ``services/messages.py`` 段。时间语义遵守 1.2 节：``received_at`` 取 ``clock.now()``，
 ``occurred_at`` 缺省等于 ``received_at``。
 """

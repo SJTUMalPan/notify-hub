@@ -1,6 +1,6 @@
 """M1 模块测试：脱敏原语与日志端到端脱敏。
 
-依据：``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M1」第 4 段第 6–8 条，
+依据：``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M1」第 4 段第 6–8 条，
 以及 ``specs/message-ingest``「凭据隔离」、``specs/notification-delivery``「凭据管理」两条需求。
 
 实现（``notify_hub.redact`` / ``notify_hub.logging_setup``）在本阶段尚不存在，因此本文件顶部

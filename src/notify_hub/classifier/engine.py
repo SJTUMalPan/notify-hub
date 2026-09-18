@@ -1,7 +1,7 @@
 """M3 匹配引擎：把原始消息映射为 ``ClassificationVerdict``。
 
 ``RuleEngine.classify`` 是纯函数（无 IO、无状态突变、不缓存分类结果），便于在请求路径上
-高频调用。规格：``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M3」。
+高频调用。规格：``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M3」。
 """
 
 from __future__ import annotations

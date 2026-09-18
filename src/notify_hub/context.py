@@ -5,7 +5,7 @@
 而互相覆盖的情况。模块因此被降级为「构造签名已冻结的库」。
 
 **本文件由架构师维护（阶段 0 共享契约），任何模块都不得修改。**
-见 ``openspec/changes/add-notify-hub/architecture.md`` 第 4.4 节。
+见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 4.4 节。
 
 注意：本文件在阶段 A（模块尚未实现时）无法导入成功，这是**预期**的。子代理不得为了
 「让它能 import」而在这里加 try/except 或桩代码。

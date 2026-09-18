@@ -11,7 +11,7 @@
 - 模型缺省值是契约的一部分：``Todo.status='pending'``、``Todo.reminder_count=0``、
   ``Message.level=Level.INFO.value``。
 
-本文件由 M2 模块负责，见 ``openspec/changes/add-notify-hub/architecture.md``
+本文件由 M2 模块负责，见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md``
 第 6 节「模块 M2：数据模型与持久化」。
 """
 

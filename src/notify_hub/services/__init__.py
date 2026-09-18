@@ -1,6 +1,6 @@
 """M6：消息/待办领域服务 + 超时提醒调度。
 
-本包提供四块内容（见 ``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M6」）：
+本包提供四块内容（见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M6」）：
 
 - :mod:`notify_hub.services.messages`：消息的写入与查询。
 - :mod:`notify_hub.services.todos`：待办的创建、去重、完成、列表与详情。

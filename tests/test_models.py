@@ -1,6 +1,6 @@
 """M2（数据模型与持久化）模块测试。
 
-**输入**：``openspec/changes/add-notify-hub/architecture.md`` 第 6 节「模块 M2 / 4. 验证方法」
+**输入**：``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M2 / 4. 验证方法」
 （外加 1.2 时间约定、1.3 已实测事实、2 节接口定义）。实现（``src/notify_hub/db.py``、
 ``models.py``）由另一个子代理交付，本文件写作时不存在。
 
