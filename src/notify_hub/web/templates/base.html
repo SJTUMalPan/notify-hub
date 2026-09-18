@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}notify-hub{% endblock %}</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 1rem; line-height: 1.5; }
+    nav { margin-bottom: 1rem; }
+    nav a { margin-right: 1rem; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ccc; padding: .35rem .5rem; text-align: left; vertical-align: top; }
+    form.inline { display: inline; margin: 0; }
+    .muted { color: #666; }
+    pre.body { white-space: pre-wrap; word-break: break-word; margin: .25rem 0; }
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/todos">待办</a>
+    <a href="/messages">消息</a>
+  </nav>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

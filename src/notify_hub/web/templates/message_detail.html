@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}消息 #{{ message.id }} · notify-hub{% endblock %}
+{% block content %}
+<h1>{{ message.title }}</h1>
+<p><a href="/messages">返回消息列表</a>{% if todo %} · <a href="/todos/{{ todo.id }}">查看关联待办</a>{% endif %}</p>
+
+<h2>消息</h2>
+<table>
+  <tbody>
+    <tr><th>编号</th><td>{{ message.id }}</td></tr>
+    <tr><th>来源</th><td>{{ message.source }}</td></tr>
+    <tr><th>级别</th><td>{{ message.level }}</td></tr>
+    <tr><th>发生时间</th><td>{{ message.occurred_at | format_time }}</td></tr>
+    <tr><th>接收时间</th><td>{{ message.received_at | format_time }}</td></tr>
+    <tr><th>正文</th><td><pre class="body">{{ message.body or "" }}</pre></td></tr>
+  </tbody>
+</table>
+
+<h2>分类结果</h2>
+<table>
+  <tbody>
+    <tr><th>规则</th><td>{{ message.rule_id or "-" }}</td></tr>
+    <tr><th>分类</th><td>{{ message.category or "-" }}</td></tr>
+    <tr><th>标签</th><td>{% for label in message.labels %}{{ label }}{% if not loop.last %}, {% endif %}{% endfor %}</td></tr>
+    <tr><th>是否入待办</th><td>{% if message.needs_ack %}是{% else %}否{% endif %}</td></tr>
+    <tr><th>入待办原因</th><td>{{ message.ack_reason or "-" }}</td></tr>
+    <tr><th>调用方声明</th><td>{% if message.need_ack_declared %}是{% else %}否{% endif %}</td></tr>
+    <tr><th>首选渠道</th><td>{{ message.preferred_channel or "-" }}</td></tr>
+  </tbody>
+</table>
+
+<h2>投递记录</h2>
+<table>
+  <thead>
+    <tr><th>时间</th><th>渠道</th><th>事件</th><th>结果</th><th>回执</th><th>失败原因</th></tr>
+  </thead>
+  <tbody>
+    {% for record in deliveries %}
+    <tr>
+      <td>{{ record.attempted_at | format_time }}</td>
+      <td>{{ record.channel_id or "-" }}</td>
+      <td>{{ record.event }}</td>
+      <td>{% if record.ok %}成功{% else %}失败{% endif %}</td>
+      <td>{{ record.receipt or "-" }}</td>
+      <td>{{ record.error_reason or "-" }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">暂无投递记录</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

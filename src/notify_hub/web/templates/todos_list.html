@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}待办列表 · notify-hub{% endblock %}
+{% block content %}
+<h1>待办列表</h1>
+<p>
+  筛选：
+  <a href="/todos?status=pending">待完成</a>
+  <a href="/todos?status=done">已完成</a>
+  <a href="/todos?status=all">全部</a>
+  <span class="muted">当前：{{ status }}</span>
+</p>
+<table>
+  <thead>
+    <tr>
+      <th>来源</th>
+      <th>分类</th>
+      <th>标题</th>
+      <th>首次通知时间</th>
+      <th>超时时长</th>
+      <th>状态</th>
+      <th>操作</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for todo in todos %}
+    <tr>
+      <td>{{ todo.source }}</td>
+      <td>{{ todo.category or "-" }}</td>
+      <td><a href="/todos/{{ todo.id }}">{{ todo.title }}</a></td>
+      <td>{{ todo.first_notified_at | format_time }}</td>
+      <td>{{ format_duration(todo.overdue_seconds) }}</td>
+      <td>{{ todo.status | status_label }}</td>
+      <td>
+        {% if todo.status.value != "done" %}
+        <form class="inline" method="post" action="/todos/{{ todo.id }}/done">
+          <button type="submit">完成</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="7" class="muted">没有匹配的待办</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

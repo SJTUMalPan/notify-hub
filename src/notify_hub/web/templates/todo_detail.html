@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}待办 #{{ detail.todo.id }} · notify-hub{% endblock %}
+{% block content %}
+<h1>{{ detail.todo.title }}</h1>
+<p><a href="/todos">返回待办列表</a></p>
+
+{# 时间序列刻意排在最前：保证「每个事件时刻首次出现」的先后顺序 === 事件先后顺序。 #}
+<h2>状态变更时间序列</h2>
+<table>
+  <thead>
+    <tr><th>时间</th><th>事件</th><th>渠道</th><th>投递结果</th></tr>
+  </thead>
+  <tbody>
+    {% for event in detail.events %}
+    <tr>
+      <td>{{ event.occurred_at | format_time }}</td>
+      <td>{{ event.kind | event_kind_label }}</td>
+      <td>{{ event.channel_id or "-" }}</td>
+      <td>{% if event.delivery_ok is none %}-{% elif event.delivery_ok %}成功{% else %}失败{% endif %}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="4" class="muted">暂无事件</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>待办</h2>
+<table>
+  <tbody>
+    <tr><th>编号</th><td>{{ detail.todo.id }}</td></tr>
+    <tr><th>来源</th><td>{{ detail.todo.source }}</td></tr>
+    <tr><th>分类</th><td>{{ detail.todo.category or "-" }}</td></tr>
+    <tr><th>状态</th><td>{{ detail.todo.status | status_label }}</td></tr>
+    <tr><th>入待办原因</th><td>{{ detail.todo.ack_reason.value }}</td></tr>
+    <tr><th>通知渠道</th><td>{{ detail.todo.preferred_channel or "-" }}</td></tr>
+    <tr><th>创建时间</th><td>{{ detail.todo.created_at | format_time }}</td></tr>
+    <tr><th>首次通知时间</th><td>{{ detail.todo.first_notified_at | format_time }}</td></tr>
+    <tr><th>最近通知时间</th><td>{{ detail.todo.last_notified_at | format_time }}</td></tr>
+    <tr><th>提醒次数</th><td>{{ detail.todo.reminder_count }}</td></tr>
+    <tr><th>完成时间</th><td>{{ detail.todo.completed_at | format_time }}</td></tr>
+    <tr><th>超时时长</th><td>{{ format_duration(detail.todo.overdue_seconds) }}</td></tr>
+  </tbody>
+</table>
+
+{% if detail.todo.status.value != "done" %}
+<form method="post" action="/todos/{{ detail.todo.id }}/done">
+  <button type="submit">完成</button>
+</form>
+{% endif %}
+
+<h2>原始消息</h2>
+<table>
+  <tbody>
+    <tr><th>编号</th><td>{{ detail.message.id }}</td></tr>
+    <tr><th>标题</th><td>{{ detail.message.title }}</td></tr>
+    <tr><th>来源</th><td>{{ detail.message.source }}</td></tr>
+    <tr><th>级别</th><td>{{ detail.message.level }}</td></tr>
+    <tr><th>分类</th><td>{{ detail.message.category or "-" }}</td></tr>
+    <tr><th>规则</th><td>{{ detail.message.rule_id or "-" }}</td></tr>
+    <tr><th>标签</th><td>{% for label in detail.message.labels %}{{ label }}{% if not loop.last %}, {% endif %}{% endfor %}</td></tr>
+    <tr><th>发生时间</th><td>{{ detail.message.occurred_at | format_time }}</td></tr>
+    <tr><th>接收时间</th><td>{{ detail.message.received_at | format_time }}</td></tr>
+    <tr><th>正文</th><td><pre class="body">{{ detail.message.body or "" }}</pre></td></tr>
+  </tbody>
+</table>
+
+<h2>投递记录</h2>
+<table>
+  <thead>
+    <tr><th>时间</th><th>渠道</th><th>结果</th><th>回执</th><th>失败原因</th></tr>
+  </thead>
+  <tbody>
+    {% for record in detail.deliveries %}
+    <tr>
+      <td>{{ record.attempted_at | format_time }}</td>
+      <td>{{ record.channel_id or "-" }}</td>
+      <td>{% if record.ok %}成功{% else %}失败{% endif %}</td>
+      <td>{{ record.receipt or "-" }}</td>
+      <td>{{ record.error_reason or "-" }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">暂无投递记录</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
