@@ -29,3 +29,11 @@ channels:
     params: { host: smtp.example.com, port: 587, use_tls: true,
               sender: notify@example.com, recipients: [me@example.com] }
     credentials: { password: NOTIFY_SMTP_PASSWORD }
+  - id: feishu
+    type: feishu
+    enabled: true
+    # 形态一：不用加签——只声明 url。
+    # 启用加签时再补上 secret: NOTIFY_FEISHU_SECRET（url 与 secret 两个环境变量都必须设置）。
+    # 不要写 `secret: null`：声明了 secret 却解析不出值，整个渠道会被判为不可用。
+    params: { timeout: 10 }
+    credentials: { url: NOTIFY_FEISHU_WEBHOOK_URL }

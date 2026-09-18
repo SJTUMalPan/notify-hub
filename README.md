@@ -3,8 +3,8 @@
 统一的消息汇聚、分类、待办跟踪与多渠道路由通知服务。
 
 把散落在各处的脚本、CI、监控告警统一投递到一个 HTTP 接口，服务按规则给消息打上
-分类、标签与「是否需要确认」，把需要跟进的消息落成**待办**，并按渠道（webhook / email）
-路由投递；超时未完成的待办会被反复提醒，直到有人在 Web 页面点「完成」。
+分类、标签与「是否需要确认」，把需要跟进的消息落成**待办**，并按渠道（webhook / email /
+feishu）路由投递；超时未完成的待办会被反复提醒，直到有人在 Web 页面点「完成」。
 
 ## 安装
 
@@ -29,8 +29,11 @@ cp rules.example.yaml rules.yaml
 
 - 配置文件默认 `./config.yaml`，也可用环境变量 `NOTIFY_HUB_CONFIG` 指向别处。
 - `channels[].credentials` 里写的**只是环境变量名**，凭据本身放在运行环境里，
-  例如 `NOTIFY_WEBHOOK_URL`、`NOTIFY_SMTP_PASSWORD`；变量为空则该渠道不可用，服务照常启动。
-- 每个配置键的含义见 [docs/configuration.md](docs/configuration.md)。
+  例如 `NOTIFY_WEBHOOK_URL`、`NOTIFY_SMTP_PASSWORD`、`NOTIFY_FEISHU_WEBHOOK_URL`；
+  变量为空则该渠道不可用，服务照常启动。
+- 内置渠道类型为 `webhook`、`email` 与 `feishu`（飞书自定义机器人；启用加签时再声明
+  `secret`，不用加签时不要声明该键）。每个配置键的含义见
+  [docs/configuration.md](docs/configuration.md)。
 
 ## 启动
 
@@ -87,5 +90,5 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/todos/1/done
 - [分类规则编写指南](docs/rule-authoring.md)：匹配语义、`case_sensitive`、
   first-match-wins 与可直接加载的规则示例。
 - [适配器开发指南](docs/adapter-guide.md)：`Notifier` 契约、`DeliveryResult` 失败语义、
-  能力声明与完整的 dummy 适配器示例。
+  能力声明、平台专属嵌套载荷（范例 `notify_hub.notifiers.feishu`）与完整的 dummy 适配器示例。
 - [部署说明](docs/deployment.md)：systemd 单元、数据文件位置与回环地址安全边界。

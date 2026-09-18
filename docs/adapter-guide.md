@@ -55,6 +55,36 @@ channels:
 渠道不可用（未启用、未知类型、凭据缺失、工厂抛异常）只会被记入
 `NotifierRegistry.unavailable_reasons()`，**不会**让服务启动失败。
 
+## 平台专属的嵌套载荷
+
+通用 `webhook` 适配器只能发**平铺 JSON**：`field_map` 仅仅把消息字段名映射成载荷里的
+**顶层**键名，既不能嵌套，也不能改变结构。但不少平台要求**嵌套**的请求体——飞书、
+钉钉、企业微信的机器人协议都是如此（例如飞书要
+`{"msg_type": "text", "content": {"text": "..."}}`，加签字段还要放在 body 顶层）。
+平铺载荷表达不了这种结构，硬塞只会得到一个验签或参数错误。
+
+**正确做法是按上面的契约新写一个专属适配器，而不是继续给 `webhook` 加开关。**
+本仓库内的现成范例是 `notify_hub.notifiers.feishu`（注册名 `feishu`）：
+
+- `FeishuNotifier` 组装嵌套请求体，`content.text` 是一段已渲染好的多行文本；
+- 凭据 `secret` **可选**：提供即启用加签，`timestamp` 与 `sign` 放在 JSON body 顶层
+  （`timestamp` 单位是**秒**），不是 URL query；
+- `send()` **绝不抛异常**：HTTP 非 2xx、响应体 `code != 0`、网络异常一律转成
+  `DeliveryResult.failure(reason)`，且 `reason` 已脱敏，不含 webhook URL 或密钥；
+- `capabilities()` 如实声明：首版只支持纯文本、`max_body_length=20000`（飞书请求体上限）、
+  不支持附加请求头。
+
+```python
+from notify_hub.notifiers.registry import NOTIFIER_FACTORIES
+from notify_hub.notifiers.feishu import build_feishu_notifier
+
+
+NOTIFIER_FACTORIES["feishu"] = build_feishu_notifier
+```
+
+配置侧对应的写法见 [configuration.md](configuration.md) 的 `feishu` 一节：不用加签时
+**只声明 `url`**，不要写 `secret: null`。
+
 ## 完整的 dummy 适配器示例
 
 下面的代码块可以直接 `exec` 运行：它定义一个最小适配器、满足 `Notifier` 协议、

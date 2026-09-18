@@ -49,6 +49,14 @@ channels:
     params: { host: smtp.example.com, port: 587, use_tls: true,
               sender: notify@example.com, recipients: [me@example.com] }
     credentials: { password: NOTIFY_SMTP_PASSWORD }
+  - id: feishu
+    type: feishu
+    enabled: true
+    # 形态一：不用加签——只声明 url。
+    # 启用加签时再补上 secret: NOTIFY_FEISHU_SECRET（url 与 secret 两个环境变量都必须设置）。
+    # 不要写 `secret: null`：声明了 secret 却解析不出值，整个渠道会被判为不可用。
+    params: { timeout: 10 }
+    credentials: { url: NOTIFY_FEISHU_WEBHOOK_URL }
 ```
 
 ### server
@@ -133,9 +141,9 @@ SQLite 数据库文件路径。**必填**；相对路径按配置文件所在目
 
 ### channels[].type
 
-适配器类型，**必填**，对应已注册的工厂名。内置类型为 `webhook` 与 `email`；未知类型只会让
-该渠道不可用（记入不可用原因），不会让服务启动失败。如何新增类型见
-[adapter-guide.md](adapter-guide.md)。
+适配器类型，**必填**，对应已注册的工厂名。内置类型为 `webhook`、`email` 与 `feishu`
+（飞书自定义机器人，见下）；未知类型只会让该渠道不可用（记入不可用原因），不会让服务
+启动失败。如何新增类型见 [adapter-guide.md](adapter-guide.md)。
 
 ### channels[].enabled
 
@@ -158,6 +166,12 @@ webhook 渠道使用的参数：把消息字段名映射为 webhook 载荷里的
 
 webhook 渠道使用的参数：附加请求头映射，缺省空映射。**不要在这里写凭据字面量**，
 只写非敏感头。
+
+### channels[].params.timeout
+
+feishu 渠道使用的参数：单次请求超时秒数，缺省 `10`。飞书的请求体是**嵌套**结构
+（`{"msg_type": "text", "content": {"text": "..."}}`），通用 `webhook` 适配器只发平铺
+JSON、`field_map` 只做顶层键改名，表达不了它，因此飞书单列一个类型。
 
 ### channels[].params.host
 
@@ -194,6 +208,20 @@ webhook 渠道的凭据键：webhook 完整 URL，从对应环境变量读取。
 ### channels[].credentials.password
 
 email 渠道的凭据键：SMTP 密码，从对应环境变量读取。
+
+### feishu 渠道
+
+`type: feishu` 对应飞书（Feishu / Lark）自定义机器人适配器。它的凭据映射有两个键，
+**值同样一律写环境变量名**：
+
+- `url`：**必填**，飞书机器人 webhook 完整 URL，从 `NOTIFY_FEISHU_WEBHOOK_URL` 这类
+  环境变量读取；token 在 URL 路径末段。
+- `secret`：**可选**；**只有启用加签时才声明**，从 `NOTIFY_FEISHU_SECRET` 这类环境变量
+  读取。提供即启用加签（`timestamp` 与 `sign` 放在 JSON body 顶层，单位是秒）。
+
+**不用加签时不要声明 `secret` 这个键**，更不要写 `secret: null`：只要声明了凭据却解析不出
+值，整个渠道的 `credentials_complete` 就是 `false`，渠道被判为不可用（这正是「你本来打算
+加签但凭据没配好」应有的语义）。非敏感的 `params.timeout` 见上。
 
 ## 环境变量
 

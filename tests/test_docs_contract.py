@@ -23,6 +23,13 @@
 6. ``test_no_document_leaks_credentials`` —— 五份文档全文不出现「键名=长随机串」形态的凭据。
 7. ``test_readme_doc_links_resolve`` —— README 中每个 ``docs/*.md`` 相对链接都可达。
 
+**另有第 8 条（M10 增量，非规格第 4 段原文）**：
+``test_every_registered_channel_type_is_documented`` —— 「每一个已在
+``NOTIFIER_FACTORIES`` 注册的渠道类型都必须在 ``docs/configuration.md`` 中被记载」。
+M10 新增 ``feishu`` 注册项时，配置文档一个字都没提飞书，属于「发布了渠道却没有文档覆盖」
+的真实缺口；本条把这类缺口变成 CI 红灯，且**只判「类型名是否出现在文档全文」**，
+不要求章节标题或句式，以免过度约束文档写法。
+
 **红是预期结果**：``README.md`` 与 ``docs/`` 下的四份文档当前都不存在（它们是 M9 的
 实现路径，由开发子代理负责）。因此提取逻辑在文件缺失时给出的是**带期望路径的、可读的
 失败信息**，而不是含糊的 ``FileNotFoundError`` 栈——这样「红」的原因可以被一眼判定为
@@ -432,6 +439,65 @@ def test_configuration_doc_covers_every_config_key() -> None:
         f"{CONFIG_DOC_PATH} 的标题里出现了 config.example.yaml 中不存在的键：{invented}；"
         f"config.example.yaml 的键集合：{sorted(all_keys)}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 第 8 条（M10 增量）：每个已注册渠道类型都必须在配置文档里被记载
+# --------------------------------------------------------------------------- #
+#: 「渠道类型名出现在文档里」的判据：大小写不敏感，且允许被下划线/连字符/反引号/中文括号
+#: 等**任意非字母数字字符**包围（``type: feishu``、`` `feishu` ``、``飞书（feishu）``、
+#: ``NOTIFY_FEISHU_WEBHOOK_URL`` 都算「出现过这个名字」）。刻意**不**要求章节标题、
+#: 句式或 ``type: <name>`` 的写法，也不要求该名以独立词出现——避免把文档的排版选择
+#: 变成失败原因；本条的判据严格限定为「类型名在不在文档里」。
+def _channel_type_is_mentioned(text: str, channel_type: str) -> bool:
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9]){re.escape(channel_type)}(?![A-Za-z0-9])",
+        re.IGNORECASE,
+    )
+    return pattern.search(text) is not None
+
+
+def _registered_channel_types() -> list[str]:
+    """``NOTIFIER_FACTORIES`` 的全部 key（导入 ``notify_hub.notifiers`` 包即完成注册）。
+
+    必须导入**包**而不是 ``notify_hub.notifiers.registry``：注册动作写在包的
+    ``__init__.py`` 里（M4 的 webhook/email，M10 追加 feishu）。
+    """
+    from notify_hub.notifiers import NOTIFIER_FACTORIES
+
+    registered = sorted(str(key) for key in NOTIFIER_FACTORIES)
+    assert registered, (
+        "NOTIFIER_FACTORIES 为空：导入 `notify_hub.notifiers` 应完成 M4 内置适配器"
+        "（webhook/email，M10 追加 feishu）的工厂注册。注册表为空时本条契约会"
+        "「零个渠道、零个缺失」地空转通过，因此先在此处失败，"
+        "而不是让文档契约失去判别力。"
+    )
+    return registered
+
+
+def test_every_registered_channel_type_is_documented() -> None:
+    """**契约**：每个已在 ``NOTIFIER_FACTORIES`` 注册的渠道类型，都必须在
+    ``docs/configuration.md`` 全文中出现（M10 缺口：``feishu`` 已注册但文档未写）。
+
+    这是「实现了渠道但没写文档」的永久自检：下一个适配器忘记写文档时，CI 直接红。
+    判据只看「渠道类型名是否出现在文档里」，不看章节标题与句式。
+    """
+    registered = _registered_channel_types()
+    text = _read_text(CONFIG_DOC_PATH, what="配置说明文档")
+
+    missing = [name for name in registered if not _channel_type_is_mentioned(text, name)]
+    assert not missing, (
+        "以下已注册的通知渠道类型未在 docs/configuration.md 中记载："
+        + "、".join(f"渠道类型 `{name}` 未在 docs/configuration.md 中记载" for name in missing)
+        + f"。已注册的渠道类型（NOTIFIER_FACTORIES 的 key）：{registered}；"
+        f"其中已出现在文档里的：{sorted(set(registered) - set(missing))}。"
+        f"请在 {CONFIG_DOC_PATH} 中补上这些渠道类型的说明与配置示例"
+        f"（例如 `channels[].type` 的取值列表、以及 `type: {missing[0]}` 的可复制配置片段），"
+        f"使文档与真实注册表对齐。"
+    )
+
+    # 反向不设断言：文档里出现未注册的 `type: xxx`（如 adapter-guide 的 dummy 示例）
+    # 是合法的教学写法，不应被本条契约判红；「文档不能臆造配置键」已由第 2 条覆盖。
 
 
 # --------------------------------------------------------------------------- #
