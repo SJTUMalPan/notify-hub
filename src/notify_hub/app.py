@@ -7,9 +7,12 @@
 - 启动：分类器（先能分类）→ 受理管道（先能收）→ 提醒调度（最后才开始提醒）
 - 关闭：提醒调度 → 受理管道 → 分类器 → 数据库
 
-M8（Web 待办界面）当前**未实施**，因此这里不挂载 web 路由。批准 M8 后由架构师在此加入
-一行 ``app.include_router(create_web_router(ctx))``。**禁止**用 try/except ImportError
-之类的静默降级来「让它跑起来」。
+路由组成（架构师维护，模块不得各自增删）：
+- M7 的 API 路由（含 `/healthz`）
+- M8 的 Web 待办界面路由
+
+**禁止**用 try/except ImportError 之类的静默降级来让应用「跑起来」——路由缺失应当直接
+在启动时暴露，而不是变成一台少了一半功能的服务器。
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from notify_hub import __version__
 from notify_hub.api import create_api_router
 from notify_hub.config import load_settings
 from notify_hub.context import AppContext, build_context
+from notify_hub.web import create_web_router
 
 
 @asynccontextmanager
@@ -52,4 +56,5 @@ def create_app(settings=None, *, ctx: AppContext | None = None) -> FastAPI:
     app = FastAPI(title="notify-hub", version=__version__, lifespan=_lifespan)
     app.state.ctx = ctx
     app.include_router(create_api_router(ctx))
+    app.include_router(create_web_router(ctx))
     return app
