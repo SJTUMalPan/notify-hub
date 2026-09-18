@@ -92,3 +92,7 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/todos/1/done
 - [适配器开发指南](docs/adapter-guide.md)：`Notifier` 契约、`DeliveryResult` 失败语义、
   能力声明、平台专属嵌套载荷（范例 `notify_hub.notifiers.feishu`）与完整的 dummy 适配器示例。
 - [部署说明](docs/deployment.md)：systemd 单元、数据文件位置与回环地址安全边界。
+- [代码走读](docs/architecture-overview.md)：目录结构与逐文件职责、启动链、一条消息从接入到
+  送达的完整数据流（每步标注确切的文件与函数）、四条跨模块不变量与建议的阅读顺序。
+- [架构可视化](docs/architecture-map.html)：纯前端单文件，双击即可打开——数据流步进器、
+  可过滤的模块地图、不变量与后台线程。
