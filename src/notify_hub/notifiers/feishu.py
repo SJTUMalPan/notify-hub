@@ -23,14 +23,12 @@ import base64
 import hashlib
 import hmac
 import logging
-from datetime import datetime
 from typing import Any, Mapping, Sequence
 
 import httpx
 
-from notify_hub.clock import Clock, SystemClock, as_utc
+from notify_hub.clock import Clock, SystemClock
 from notify_hub.config import ChannelSpec
-from notify_hub.domain import DeliveryEvent
 from notify_hub.errors import ConfigurationError
 from notify_hub.redact import extract_url_secrets, redact_exception, redact_text
 
@@ -39,9 +37,6 @@ from .base import ChannelCapabilities, DeliveryResult, NotificationMessage
 __all__ = ["FeishuNotifier", "build_feishu_notifier", "sign_feishu"]
 
 _LOGGER = logging.getLogger("notify_hub.notifiers.feishu")
-
-#: 时间文本格式（冻结）：UTC、去微秒，与 M8 页面同一格式。
-_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
 def sign_feishu(timestamp: int, secret: str) -> str:
@@ -54,29 +49,17 @@ def sign_feishu(timestamp: int, secret: str) -> str:
     return base64.b64encode(digest).decode("utf-8")
 
 
-def _format_time(moment: datetime) -> str:
-    return as_utc(moment).strftime(_TIME_FORMAT)
-
-
 def _render_text(msg: NotificationMessage) -> str:
-    """冻结的多行文本（第 3 段第 8 条）。"""
-    lines = [
-        f"[{msg.level.value.upper()}] {msg.title}",
-        f"来源: {msg.source}",
-        f"时间: {_format_time(msg.occurred_at)}",
-    ]
-    if msg.category is not None:
-        lines.append(f"分类: {msg.category}")
-    if msg.kind is DeliveryEvent.REMINDER and msg.overdue_seconds is not None:
-        # 惰性导入以避开 ``notifiers`` <-> ``services`` 的包级循环；
-        # 复用 M6 的唯一一份 ``format_duration`` 实现，不在此重复实现。
-        from notify_hub.services.notifications import format_duration
+    """冻结的多行文本（第 3 段第 8 条）：标题 + 空行 + ``msg.body`` 原样。
 
-        lines.append(f"已超时: {format_duration(msg.overdue_seconds)}")
-    if msg.body:
-        lines.append("")
-        lines.append(msg.body)
-    return "\n".join(lines)
+    4.6 节「正文渲染归属」不变量：``msg.body`` 已是完整正文（含 ``来源``/``时间``/
+    ``分类``/可选 ``已超时``），适配器 MUST NOT 再拼这些表头，否则会重复出现。
+    ``msg.body`` 为空时只发标题行。
+    """
+    title = f"[{msg.level.value.upper()}] {msg.title}"
+    if not msg.body:
+        return title
+    return f"{title}\n\n{msg.body}"
 
 
 class FeishuNotifier:

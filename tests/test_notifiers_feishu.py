@@ -58,6 +58,28 @@ FROZEN_EPOCH_SECONDS = 1704067200
 
 FEISHU_SECRET = "FEISHU-SIGN-SECRET"
 
+#: 与 M6 ``notification_for_message`` **实际产出**同形的正文（``来源``/``分类``/``时间``/空行/原始正文）。
+#: 渠道文案规格必须按「拿到的就是完整正文」来写：拿简短的 ``"backup job failed at 02:00"`` 当 body，
+#: 适配器自己补一层表头也能通过，而真实用户看到的 ``来源``/``时间`` 各两次就抓不到。
+#: 该 ISO 形态由 M6 的 ``as_utc(...).isoformat()`` 产出。
+FIRST_NOTICE_BODY = (
+    "来源: backup-svc\n"
+    "分类: backup-failure\n"
+    "时间: 2024-05-01T12:00:00+00:00\n"
+    "\n"
+    "backup job failed at 02:00"
+)
+
+#: 提醒类的正文形如 M6 产出：``来源``/``分类``/``已超时``/``待办 id``/空行/原始正文。
+REMINDER_BODY = (
+    "来源: backup-svc\n"
+    "分类: backup-failure\n"
+    "已超时: 1 小时 5 分钟\n"
+    "待办 id: 7\n"
+    "\n"
+    "backup job failed at 02:00"
+)
+
 #: 飞书 token 在 **URL 路径末段**（不是 query）——第 4 段第 11 条刻意选这个形态。
 TOKEN = "FSECRETTOKEN123456"
 WEBHOOK_URL = f"https://open.feishu.cn/open-apis/bot/v2/hook/{TOKEN}"
@@ -219,7 +241,8 @@ def test_payload_is_nested_feishu_text_shape():
     spy = _FeishuSpy(_respond_json(200, {"code": 0, "msg": "success", "data": {}}))
     notifier = _new_feishu(spy)
 
-    assert notifier.send(_new_message()).ok is True
+    message = _new_message(body=FIRST_NOTICE_BODY)
+    assert notifier.send(message).ok is True
 
     payload = spy.payload()
     assert payload["msg_type"] == "text"
@@ -228,6 +251,14 @@ def test_payload_is_nested_feishu_text_shape():
     assert isinstance(text, str)
     assert "备份失败" in text, "content.text 必须含标题"
     assert "backup-svc" in text, "content.text 必须含来源"
+
+    # 第 3 段第 8 条（已修正重复）：正文部分**就是 msg.body 原样**，不得再拼 来源/时间/分类/已超时 表头。
+    assert text == f"[ERROR] 备份失败\n\n{FIRST_NOTICE_BODY}", (
+        f"content.text 必须是 '[LEVEL] title' + 空行 + msg.body 原样，实际 {text!r}"
+    )
+    assert text.count("来源:") == 1, f"来源 只应出现一次（来自 msg.body），实际 {text.count('来源:')} 次"
+    assert text.count("时间:") == 1, f"时间 只应出现一次（来自 msg.body），实际 {text.count('时间:')} 次"
+    assert text.count("分类:") == 1, f"分类 只应出现一次（来自 msg.body），实际 {text.count('分类:')} 次"
 
     for flat_key in FLAT_KEYS:
         assert flat_key not in payload, f"顶层不得出现通用 webhook 的平铺键 {flat_key}"
@@ -238,11 +269,15 @@ def test_payload_is_nested_feishu_text_shape():
 
 
 def test_payload_text_includes_title_level_source_and_time():
-    """第 3 段第 8 条：文本必须含标题、级别、来源、时间。"""
+    """第 3 段第 8 条：文本必须是 ``[LEVEL] title`` + 空行 + ``msg.body`` 原样。
+
+    标题、级别、来源、时间都必须出现——但**各恰好一次**（来源/时间来自 ``msg.body``）。
+    """
     spy = _FeishuSpy(_respond_json(200, {"code": 0, "msg": "success"}))
     notifier = _new_feishu(spy)
 
-    assert notifier.send(_new_message()).ok is True
+    message = _new_message(body=FIRST_NOTICE_BODY, category="backup-failure")
+    assert notifier.send(message).ok is True
 
     text = _content_text(spy)
     assert "备份失败" in text
@@ -250,12 +285,24 @@ def test_payload_text_includes_title_level_source_and_time():
     assert "error" in text.lower(), "content.text 必须含级别（Level 的值）"
     assert "2024-05-01" in text, "content.text 必须含时间"
     assert "12:00" in text, "content.text 必须含时间"
+    # 前提检查：注入的 body 确实自带这些行；否则下面的「恰好一次」会退化成空断言。
+    assert "来源: backup-svc" in FIRST_NOTICE_BODY
+    assert "时间: 2024-05-01T12:00:00+00:00" in FIRST_NOTICE_BODY
+    assert "分类: backup-failure" in FIRST_NOTICE_BODY
+    assert text.count("来源:") == 1, f"来源 重复渲染了：{text!r}"
+    assert text.count("时间:") == 1, f"时间 重复渲染了：{text!r}"
+    assert text.count("分类:") == 1, f"分类 重复渲染了：{text!r}"
+    # 逐字符等价：任何多拼的表头都会让这条失败。
+    assert text == f"[ERROR] 备份失败\n\n{FIRST_NOTICE_BODY}", (
+        f"content.text 必须是 '[LEVEL] title' + 空行 + msg.body 原样，实际 {text!r}"
+    )
 
 
 def test_reminder_text_includes_overdue_duration():
     """第 3 段第 8 条：提醒类必须含已超时时长，且复用 M6 的 ``format_duration``。
 
     标题刻意**不含**时长，否则下面的「时长在文本中」会被标题本身假通过。
+    时限**只允许出现一次**（在 ``msg.body`` 里），适配器不得再拼 ``已超时:`` 表头。
     """
     from notify_hub.domain import DeliveryEvent
     from notify_hub.services.notifications import format_duration
@@ -265,6 +312,7 @@ def test_reminder_text_includes_overdue_duration():
 
     msg = _new_message(
         title="备份失败（提醒）",
+        body=REMINDER_BODY,
         kind=DeliveryEvent.REMINDER,
         todo_id=7,
         overdue_seconds=3900.0,
@@ -278,6 +326,12 @@ def test_reminder_text_includes_overdue_duration():
     assert duration not in msg.title, "前提：标题不含时长，断言才非空过"
     assert duration in text, "提醒文案必须复用 M6 的 format_duration 输出"
     assert "备份失败" in text
+    assert text.count("已超时:") == 1, f"已超时 重复渲染了：{text!r}"
+    assert text.count("待办 id:") == 1, f"待办 id 重复渲染了：{text!r}"
+    assert text.count(duration) == 1, f"时长在文本中应恰好一次，实际 {text.count(duration)} 次"
+    assert text == f"[ERROR] 备份失败（提醒）\n\n{REMINDER_BODY}", (
+        f"content.text 必须是 '[LEVEL] title' + 空行 + msg.body 原样，实际 {text!r}"
+    )
 
 
 # --------------------------------------------------------------------------- #

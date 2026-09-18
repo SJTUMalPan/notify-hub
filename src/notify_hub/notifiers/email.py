@@ -3,7 +3,8 @@
 通过 SMTP 发送纯文本通知邮件。``smtp_factory`` 是唯一的测试接缝（错误注入用）；
 正常路径由测试启动本机 ``aiosmtpd`` 验证。
 
-主题：``[<LEVEL>] <title>``；正文：来源、ISO 时间、可选超时时长、空行、消息正文。
+主题：``[<LEVEL>] <title>``；正文**就是 ``msg.body`` 原样**（4.6 节「正文渲染归属」：
+``msg.body`` 已含 ``来源``/``时间``/可选 ``已超时``/空行/原始正文，适配器不得再拼表头）。
 
 本文件由 M4 模块负责。
 """
@@ -24,23 +25,6 @@ from .base import ChannelCapabilities, DeliveryResult, NotificationMessage
 __all__ = ["EmailNotifier", "build_email_notifier"]
 
 _LOGGER = logging.getLogger("notify_hub.notifiers.email")
-
-
-def _format_duration(seconds: float) -> str:
-    """把秒数格式化为可读时长（不依赖其它模块的格式化函数）。"""
-    total = int(seconds)
-    days, rem = divmod(total, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes, secs = divmod(rem, 60)
-    parts: list[str] = []
-    if days:
-        parts.append(f"{days}d")
-    if hours or days:
-        parts.append(f"{hours}h")
-    if minutes or hours or days:
-        parts.append(f"{minutes}m")
-    parts.append(f"{secs}s")
-    return "".join(parts)
 
 
 class EmailNotifier:
@@ -83,20 +67,11 @@ class EmailNotifier:
         return smtplib.SMTP(self._host, self._port, timeout=self._timeout)
 
     def _build_message(self, msg: NotificationMessage) -> _EmailMessage:
-        lines = [
-            f"来源: {msg.source}",
-            f"时间: {msg.occurred_at.isoformat()}",
-        ]
-        if msg.overdue_seconds is not None:
-            lines.append(f"已超时: {_format_duration(msg.overdue_seconds)}")
-        lines.append("")
-        lines.append(msg.body)
-
         message = _EmailMessage()
         message["Subject"] = f"[{msg.level.value.upper()}] {msg.title}"
         message["From"] = self._sender
         message["To"] = ", ".join(self._recipients)
-        message.set_content("\n".join(lines), charset="utf-8")
+        message.set_content(msg.body, charset="utf-8")
         return message
 
     # ------------------------------------------------------------------ #

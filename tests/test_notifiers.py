@@ -30,6 +30,28 @@ UTC = timezone.utc
 MESSAGE_TIME = datetime(2024, 5, 1, 12, 0, 0, tzinfo=UTC)
 SMTP_PASSWORD = "S3CRET-SMTP-PASSWORD"
 
+#: 与 M6 ``notification_for_message`` **实际产出**同形的正文（``来源``/``分类``/``时间``/空行/原始正文）。
+#: 渠道渲染规格必须按「拿到的就是完整正文」来写：拿简短的 ``"根分区使用率 95%"`` 当 body，
+#: 适配器自己补一层表头也能通过，真实用户看到的 ``来源``/``时间`` 各出现两次就抓不到。
+#: 该 ISO 形态由 M6 的 ``as_utc(...).isoformat()`` 产出。
+FIRST_NOTICE_BODY = (
+    "来源: alert-svc\n"
+    "分类: disk\n"
+    "时间: 2024-05-01T12:00:00+00:00\n"
+    "\n"
+    "根分区使用率 95%"
+)
+
+#: 提醒类的正文形如 M6 产出：``来源``/``分类``/``已超时``/``待办 id``/空行/原始正文。
+REMINDER_BODY = (
+    "来源: alert-svc\n"
+    "分类: disk\n"
+    "已超时: 1 小时 5 分钟\n"
+    "待办 id: 7\n"
+    "\n"
+    "根分区使用率 95%"
+)
+
 
 # --------------------------------------------------------------------------- #
 # 测试辅助（不在模块顶部导入实现）
@@ -516,7 +538,7 @@ def test_email_send_success_via_local_smtp():
             sender="notify@example.com",
             recipients=recipients,
         )
-        result = notifier.send(_new_message(title="磁盘空间不足", source="alert-svc"))
+        result = notifier.send(_new_message(title="磁盘空间不足", body=FIRST_NOTICE_BODY))
     finally:
         controller.stop()
 
@@ -532,9 +554,77 @@ def test_email_send_success_via_local_smtp():
         assert recipient in to_header
 
     body = _body_text(parsed)
-    assert "来源: alert-svc" in body
-    assert "2024-05-01T12:00:00" in body
+    # 规格 6-M4 第 3 段「Email 主题与正文（冻结，已修正重复）」+ 4.6「正文渲染归属」：
+    # 正文**就是 msg.body 原样**。适配器若再拼一层表头，下列计数会变成 2。
+    # 前提检查：注入的 body 确实自带这些行（否则「恰好一次」会退化成空断言）。
+    assert "来源: alert-svc" in FIRST_NOTICE_BODY
+    assert "时间: 2024-05-01T12:00:00+00:00" in FIRST_NOTICE_BODY
+    assert body.count("来源:") == 1, f"来源 只应出现一次（来自 msg.body），实际 body={body!r}"
+    assert body.count("时间:") == 1, f"时间 只应出现一次（来自 msg.body），实际 body={body!r}"
+    assert "来源: alert-svc" in body, "msg.body 里的来源行必须原样送达"
+    assert "分类: disk" in body, "msg.body 里的分类行必须原样送达（适配器无需也无法补）"
+    assert "2024-05-01T12:00:00+00:00" in body, "msg.body 里的 ISO 时间必须原样送达"
     assert "根分区使用率 95%" in body
+    assert "\n\n" in body
+
+
+def test_email_body_is_msg_body_verbatim_without_duplicate_headers():
+    """回归闸门：email 正文 MUST 是 ``msg.body`` 原样，不得重复渲染 ``来源``/``时间``/``已超时``。
+
+    真实用户曾在飞书群看到 ``来源``/``分类``/``时间`` 各两次——根因是 M6 的 ``msg.body``
+    已含这些行，而渠道适配器又加了一层表头（``email`` 与 ``feishu`` 同型）。
+    本用例同时钉住「计数为 1」与「正文逐字符等于 msg.body」，任一形态的重复都会被抓住。
+    """
+    from aiosmtpd.controller import Controller
+
+    from notify_hub.domain import DeliveryEvent
+    from notify_hub.notifiers.email import EmailNotifier
+
+    sink = _SmtpSink()
+    port = _free_port()
+    controller = Controller(sink, hostname="127.0.0.1", port=port)
+    controller.start()
+    try:
+        notifier = EmailNotifier(
+            "email",
+            host="127.0.0.1",
+            port=port,
+            sender="notify@example.com",
+            recipients=["oncall@example.com"],
+        )
+        assert notifier.send(
+            _new_message(title="磁盘空间不足", body=FIRST_NOTICE_BODY, category="disk")
+        ).ok is True
+        assert notifier.send(
+            _new_message(
+                title="[待办超时 1 小时 5 分钟] 磁盘空间不足",
+                body=REMINDER_BODY,
+                category="disk",
+                kind=DeliveryEvent.REMINDER,
+                todo_id=7,
+                overdue_seconds=3900.0,
+            )
+        ).ok is True
+    finally:
+        controller.stop()
+
+    assert len(sink.envelopes) == 2, "两封邮件都必须真的发出去"
+    bodies = [_body_text(message_from_bytes(envelope.content)) for envelope in sink.envelopes]
+
+    first = bodies[0]
+    for header in ("来源:", "分类:", "时间:"):
+        assert first.count(header) == 1, f"首报邮件里 {header} 只应出现一次，实际 {first.count(header)} 次"
+    # 「原样」：去掉邮件编码层引入的行尾差异后必须逐字符相等（多一行表头就会不等）。
+    assert first.rstrip("\r\n") == FIRST_NOTICE_BODY, f"email 正文必须逐字符等于 msg.body，实际 {first!r}"
+    assert FIRST_NOTICE_BODY in first.replace("\r\n", "\n"), "msg.body 必须以原文形态送达"
+
+    reminder = bodies[1]
+    for header in ("来源:", "分类:", "已超时:", "待办 id:", "时间:"):
+        expected = 0 if header == "时间:" else 1
+        assert reminder.count(header) == expected, (
+            f"提醒邮件里 {header} 出现 {reminder.count(header)} 次，应为 {expected} 次"
+        )
+    assert reminder.rstrip("\r\n") == REMINDER_BODY, f"提醒邮件正文必须逐字符等于 msg.body，实际 {reminder!r}"
 
 
 def test_email_authentication_failure_is_readable_and_redacted():
