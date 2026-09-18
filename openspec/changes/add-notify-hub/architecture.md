@@ -339,6 +339,20 @@ self._secrets = tuple(dict.fromkeys((*secrets, *extract_url_secrets(webhook_url)
 ```
 （保序去重；`secrets` 仍照收，用于覆盖调用方知道而 URL 里没有的额外密钥。）
 
+**不变量（正文渲染归属，修正一处真实的重复）**：
+**`NotificationMessage.body` 已经是「渲染完整的人类可读正文」**——由 M6 的
+`notification_for_message` 构造，其中**已含** `来源`/`分类`/`时间`（提醒类还含 `已超时`/`待办 id`）
+以及空行与原始正文。
+
+因此：**适配器 MUST NOT 把 `source`/`category`/`occurred_at`/`overdue_seconds` 这些上下文
+再渲染一遍进正文**。适配器只负责**呈现层的标题**（级别前缀、超时前缀）与渠道特有的包装，
+正文一律**原样使用 `msg.body`**。
+
+**该重复曾被真实用户发现**：飞书收到的消息里 `来源`/`时间` 各出现两次——`email` 适配器与
+`feishu` 适配器的正文渲染都曾自己加一层表头（`来源`/`时间`/`已超时`），而 `msg.body` 里本就有一份。
+根因是 M10 规格冻结 `content.text` 格式时**没有先核对 `msg.body` 里已经有什么**。
+排查此类问题的通用做法：**写渠道渲染规格前，先读一遍 `notification_for_message` 的实际输出**。
+
 ---
 
 ## 5. 模块清单、批次与预算
@@ -419,8 +433,8 @@ class ChannelSpec:
 @dataclass(frozen=True)
 class ReminderSettings:
     scan_interval_seconds: float = 60.0
-    first_reminder_after_seconds: float = 1800.0     # 首次提醒门槛（自 first_notified_at 起）
-    reminder_interval_seconds: float = 3600.0        # 后续提醒间隔
+    first_reminder_after_seconds: float = 28800.0    # 首次提醒门槛（自 first_notified_at 起）= 8 小时
+    reminder_interval_seconds: float = 28800.0       # 后续提醒间隔 = 8 小时
 
 @dataclass(frozen=True)
 class Settings:
@@ -548,8 +562,8 @@ class SecretFilter(logging.Filter):
   rules: { path: ./rules.yaml, poll_interval_seconds: 5 }
   reminders:
     scan_interval_seconds: 60
-    first_reminder_after_seconds: 1800
-    reminder_interval_seconds: 3600
+    first_reminder_after_seconds: 28800
+    reminder_interval_seconds: 28800
   default_channel: webhook
   channels:
     - id: webhook
@@ -1169,9 +1183,11 @@ is_fallback  = preferred_channel is not None and used_channel != preferred_chann
 **Webhook 成功时的 `receipt`（冻结）**：取响应体 JSON 中 `msg`/`message`/`id` 的**首个非空值**
 并转为字符串；都取不到（含响应体非 JSON）时用 `f"HTTP {status_code}"`。`receipt` 永不为空。
 
-**Email 主题与正文（冻结）**：主题 `f"[{msg.level.value.upper()}] {msg.title}"`；
-正文纯文本，依次含 `来源: {source}`、`时间: {occurred_at ISO}`、可选 `已超时: {format 时长}`、
-空行、`msg.body`。
+**Email 主题与正文（冻结，已修正重复）**：主题 `f"[{msg.level.value.upper()}] {msg.title}"`；
+**正文就是 `msg.body` 原样**（它已含 `来源`、`时间`、可选 `已超时`、空行与原始正文——
+见 4.6 节的「正文渲染归属」不变量）。
+**不得**再自行拼接 `来源:`/`时间:`/`已超时:` 表头——那会让这些字段在邮件里出现两次
+（该缺陷曾在飞书渠道被真实用户发现，`email` 与 `feishu` 是同型的）。
 
 **不变量**
 - `Notifier.send()` 与 `DeliveryService.deliver()` **MUST NOT 抛出异常**：网络错误、超时、
@@ -2066,19 +2082,22 @@ def build_feishu_notifier(spec: ChannelSpec, secrets: Sequence[str]) -> FeishuNo
      `19024 Key Words Not Found`、`19022 Ip Not Allowed`、`11232` 限流。
    - 响应体非 JSON → 只看 HTTP 状态。
 7. **`receipt`**：取响应体 `msg`（非空时），否则 `f"HTTP {status_code}"`。**永不为空**。
-8. **文本内容**（`content.text`）**格式冻结如下**（多行字符串）：
+8. **文本内容**（`content.text`）**格式冻结如下**（多行字符串，**已修正重复**）：
    ```
    [<LEVEL>] <title>
-   来源: <source>
-   时间: <YYYY-MM-DD HH:MM:SS>            ← UTC，去微秒（与 M8 页面同一格式）
-   分类: <category>                        ← category 为 None 时整行省略
-   已超时: <format_duration(overdue)>      ← 仅 kind == REMINDER 时出现
    <空行>
-   <body>                                  ← body 为 None 时省略该行与其前的空行
+   <msg.body 原样>
    ```
-   `<LEVEL>` 取 `msg.level.value.upper()`（`INFO`/`WARNING`/`ERROR`）。
-   超时时长**复用 M6 的** `notify_hub.services.notifications.format_duration`（与 M8 同一裁定：
-   同一段用户可见文案不得有两份实现）。
+   - `<LEVEL>` 取 `msg.level.value.upper()`（`INFO`/`WARNING`/`ERROR`）。
+   - **正文部分就是 `msg.body` 原样，不得再拼 `来源:`/`时间:`/`分类:`/`已超时:` 表头**——
+     `msg.body` 里本就有这些（见 4.6 节「正文渲染归属」不变量）。
+     旧规格曾要求这些字段出现在 `content.text` 的表头里，导致它们与 `msg.body` 中的同名行
+     **重复出现两次**，已由真实用户在飞书群中发现。
+   - `msg.body` 为空时，省略空行与正文，只发标题行。
+   - 超时时长同样**不得自行拼**——它已在 `msg.title`（`[待办超时 X] …`）与 `msg.body`（`已超时: …`）里。
+   - 若仍需 `format_duration`（例如将来做富文本卡片），**复用 M6 的唯一一份实现**
+     （同一裁定：同一段用户可见文案不得有两份实现）；当前位置是函数内惰性导入，以避开
+     `notifiers` ↔ `services` 的包级循环。
 9. **`capabilities()` 取值冻结**：`supports_rich_text=False`（首版只做 `text`）、
    `max_body_length=20000`（飞书限制请求体 ≤ 20 KB）、`supports_headers=False`。
 10. **限制**（写进文档，不强制实现）：请求体 ≤ 20 KB；单机器人 100 次/分钟、5 次/秒。
@@ -2246,6 +2265,7 @@ def build_feishu_notifier(spec: ChannelSpec, secrets: Sequence[str]) -> FeishuNo
 | **D-7** | 首版不含 Alembic 迁移链，`init_schema()` 用幂等 `create_all` | 全新项目无历史版本；`design.md` 迁移计划即「无数据迁移」 | 决策 5 / Migration Plan |
 | **D-8** | CLI 退出码冻结为 0/1/2/3（1=服务端拒绝、2=用法错误、3=不可达） | spec 只要求「非零」；但测试必须能区分三种失败，且避免与 click 的用法错误码 2 冲突 | — |
 | **D-9** | **`httpx` logger 被压到 `WARNING`**（当前实现位置：`src/notify_hub/notifiers/webhook.py` 导入时） | **安全必要**：实测 `httpx` 在 INFO 级别记录完整请求 URL，其中含 `access_token` 等凭据，会直接违反 spec notification-delivery 的「凭据管理」——凭据 MUST NOT 出现在日志中。M1 的 `SecretFilter` 装在**根 logger 的 handler** 上，而 `httpx` 的记录经 propagation 直达 handler、且 pytest 的 `caplog` 自带独立 handler，因此 filter 拦不住它。压制该 logger 是当前唯一简洁有效的止血方式 | spec notification-delivery「凭据管理」；`design.md` 决策 8 |
+| **D-10** | **超时提醒默认值由「首次门槛 1800s / 间隔 3600s」改为「两者均 28800s（8 小时）」** | **用户裁定**：实际使用中 30 分钟门槛 + 60 分钟间隔过于频繁，明确要求改为 8 小时以降低打扰。这是**产品行为层面的决定**，覆盖 `design.md` 决策 6 里「首次提醒门槛 30 分钟、提醒间隔 60 分钟」的原始取值；两个参数仍完全可配置，仅默认值改变。`design.md` **保持原样不动**（它是设计基线，记录的是当时的选择），偏差在此登记 | **覆盖** `design.md` 决策 6 的默认值 |
 
 ### 9.1 阶段 A 的过程记录（审查者需要核实的事项）
 
