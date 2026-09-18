@@ -19,7 +19,7 @@ import httpx
 
 from notify_hub.config import ChannelSpec
 from notify_hub.errors import ConfigurationError
-from notify_hub.redact import redact_exception, redact_text
+from notify_hub.redact import extract_url_secrets, redact_exception, redact_text
 
 from .base import ChannelCapabilities, DeliveryResult, NotificationMessage
 
@@ -77,7 +77,10 @@ class WebhookNotifier:
         self._error_path = error_path
         self._success_codes = tuple(success_codes)
         self._transport = transport
-        self._secrets = tuple(secrets)
+        # 不变量（4.6 节，第二次 P1 后新增）：适配器自身持有 URL 形态凭据时，
+        # MUST 在 __init__ 中从该 URL 派生密钥并与注入的 secrets 合并（保序去重），
+        # 使「凭据不进日志/error_reason」由构造保证，不依赖调用方纪律。
+        self._secrets = tuple(dict.fromkeys((*secrets, *extract_url_secrets(url))))
 
     # ------------------------------------------------------------------ #
     def capabilities(self) -> ChannelCapabilities:

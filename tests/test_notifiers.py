@@ -646,3 +646,38 @@ def test_webhook_business_error_echoing_bare_token_is_redacted(tmp_path, caplog)
     assert "invalid access_token" in (result.error_reason or "")
     assert BARE_TOKEN not in (result.error_reason or "")
     assert BARE_TOKEN not in caplog.text
+
+
+#: 路径末段形态的凭据（第三次 P1 的向量）：调用方**没传** secrets 时也必须被脱敏。
+PATH_TOKEN = "whk_9f3Aq7ZmXpL2VtRb"  # 24 字符，仅 [A-Za-z0-9_-]
+PATH_TOKEN_URL = f"https://hooks.example.com/robot/send/{PATH_TOKEN}"
+
+
+def test_webhook_derives_secrets_from_own_url_when_caller_passes_none(caplog):
+    """回归闸门（第三次 P1 的镜像）：适配器 MUST 自行从 URL 派生密钥。
+
+    形态刻意钉死「调用方纪律缺失」：凭据在 **URL 路径末段**，且构造时
+    ``secrets=()``（调用方没传、也拿不到额外密钥）。平台在 ``msg`` 里只回显
+    **裸 token**（不含完整 URL），因此只有适配器在 ``__init__`` 中经
+    ``extract_url_secrets(url)`` 自行派生，才可能匹配上并脱敏。
+    """
+    spy = _WebhookSpy(
+        _respond_json(200, {"code": 40001, "msg": f"invalid token: {PATH_TOKEN}"})
+    )
+    notifier = _new_webhook(
+        spy, channel_id="derived-wh", url=PATH_TOKEN_URL, secrets=()
+    )
+
+    caplog.set_level(logging.DEBUG)
+    result = notifier.send(_new_message())
+
+    assert result.ok is False
+    # 正控：先证明前置条件真的触发了，否则下面两条「不含」会毫无意义地空过
+    assert PATH_TOKEN in str(spy.requests[0].url), "前提：凭据确实在请求 URL 路径末段"
+    assert "invalid token" in (result.error_reason or ""), (
+        f"前置条件未触发：平台回显未进入 error_reason（{result.error_reason!r}）"
+    )
+    assert caplog.records, "前置条件未触发：适配器未产生任何日志"
+    # 断言本体：调用方没传 secrets，裸 token 仍不得出现在失败原因与日志中
+    assert PATH_TOKEN not in (result.error_reason or "")
+    assert PATH_TOKEN not in caplog.text
