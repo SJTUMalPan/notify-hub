@@ -330,3 +330,98 @@ commit**。那是**架构师下令的修正，不是开发工篡改测试**—�
 
 **冻结点**：R1～R4 之后 §3 的接口即为最终版。此后任何改动都必须走「重开冻结 → 复核受影响
 测试与实现」的流程。
+
+## 7. 阶段 E 审查后的 P2 补救（R5）
+
+审查结论 `pass-with-findings`：**P0 无、P1 无**，3 条 P2。按流程 P2 由架构师自主修复，
+不打断用户。
+
+| # | P2 | 处置 |
+|---|---|---|
+| 1 | 配置令牌后 `notify` CLI 的全部 HTTP 操作被 401；`design.md` 的「令牌配置留着无害」与实际相悖 | **新增模块 M-B**（见 §7.1）；同时修正 `design.md` 的措辞 |
+| 2 | `design.md` D4 承诺的「启动时输出显著告警」未实现 | **架构师已实现**（`app.py`：`auth_token is None` 时打一条 WARNING）；测试由 verify 补 |
+| 3 | delta 规格「令牌轮换立即生效」无专用测试 | verify 在 `tests/test_auth.py` 追加一条 |
+
+**规模变化**：模块数 1 → **2**，派发数 +2（新模块的测试与实现）。仍远低于 8 模块阈值，
+无需重新征求分批意见。
+
+### 7.1 模块 M-B：CLI 令牌支持
+
+**文件边界**
+
+- **实现路径**（`subagent_dev`）：`src/notify_hub/cli.py`
+- **测试路径**（`subagent_verify`）：`tests/test_cli_token.py`（新建）
+
+`tests/test_cli.py` 与 `tests/test_integration_cli.py` 是既有测试，**两者都不得修改**；
+`cli.py` 的既有行为必须逐字节保持。
+
+#### 1. 功能
+
+让 `notify` CLI 在服务端启用访问令牌之后继续可用。CLI 被刻意设计成**独立客户端**
+（只依赖 `typer` / `httpx` / 标准库，**不导入本项目其它模块**），因此它**不能**去读
+`config.yaml` 里的令牌——令牌必须由使用者显式给出。
+
+**不做**：不改端点解析、不改任何输出格式、不改 `--endpoint` 语义、不引入新依赖、
+不让 CLI 读配置文件、不动既有的错误文案结构。
+
+#### 2. 接口
+
+```python
+def _resolve_token(token: Optional[str]) -> Optional[str]
+def _with_token(
+    params: Optional[dict[str, Any]], token: Optional[str]
+) -> Optional[dict[str, Any]]
+```
+
+- `_resolve_token`：解析顺序 `--token` 参数 > 环境变量 `NOTIFY_HUB_TOKEN` > `None`；
+  取值 `strip()` 后为空则视同未提供。**镜像既有 `_resolve_endpoint` 的写法与注释风格。**
+- `_with_token`：`token is None` → **原样返回入参对象本身**（不复制、不包装）；
+  否则返回**新** dict，含原有全部键并加上 `"token": token`。
+  **任何情况下都不得就地修改入参 dict。**
+- 三个子命令各加一个 `--token` 选项（与既有 `--endpoint` 同构）：
+  - `notify send` → `params=_with_token(None, token)`
+  - `notify todo list` → 与既有 `status` 参数合并
+  - `notify todo done` → 同理
+- **未提供令牌时，发出的请求必须与变更前逐字节等价**——这既是既有测试继续通过的前提，
+  也是向后兼容的契约。
+- **窄口径 401 提示**：当响应为 `401` **且本次未提供令牌**时，错误信息除既有原因外
+  **必须**包含 `--token` 或 `NOTIFY_HUB_TOKEN` 字样。提供了令牌仍 401 时**不要求**该提示。
+  两种情况退出码都是 1。
+- CLI **不得**在任何输出里打印令牌。
+
+#### 3. 内部实现
+
+- 只改 `cli.py`；只用既有依赖。
+- 令牌经**查询参数**传递——守卫只接受 `?token=` 或会话 Cookie，**不读任何请求头**。
+  这一点必须照做，**不要发明 `Authorization` 头**。
+- 沿用既有 `_request` / `build_client` 接缝，不新增 HTTP 调用路径。
+- `--token` 的 help 文案要提醒：命令行传参会进 shell 历史，长期使用建议改用环境变量。
+
+#### 4. 验证方法
+
+测试文件 `tests/test_cli_token.py`；命令 `.venv/bin/python -m pytest tests/test_cli_token.py -q`。
+
+| 验收点 | 可观察结果 |
+|---|---|
+| `_resolve_token` 优先级 | 参数 > 环境变量 > `None`；空白串视同未提供 |
+| `_with_token(None, None)` | 返回 `None` |
+| `_with_token({"status":"all"}, None)` | 返回**同一个对象**（`is`），未被复制 |
+| `_with_token({"status":"all"}, "T")` | 新 dict 同时含 `status` 与 `token`；**入参 dict 未被改动** |
+| `notify send --token T`（MockTransport） | 请求查询串含 `token=T`，请求体与不带令牌时一致 |
+| `notify send`（无令牌） | 请求 URL **不含** `token`（与变更前等价） |
+| `notify todo list --token T` | 查询串同时含 `status` 与 `token` |
+| 环境变量 `NOTIFY_HUB_TOKEN` | 与 `--token` 等效；`--token` 优先 |
+| 401 且未提供令牌 | 退出码 1，stderr 含 `--token` 或 `NOTIFY_HUB_TOKEN` |
+| 401 但已提供令牌 | 退出码 1；不要求提示文案 |
+| 输出不含令牌明文 | 命令 stdout/stderr 中令牌出现次数为 0 |
+
+**异常场景（至少 2 条）**：① 已提供令牌仍返回 401 —— 不得谎报成功，退出码 1；
+② 环境变量为空白串 —— 视同未提供，请求不含 `token`。
+
+**另外两组测试属于架构师交付物，verify 只写测试、不改实现**：
+
+- `tests/test_startup_warning.py`（新建）：`create_app` 在 `auth_token is None` 时打出一条
+  含「未配置」字样的 WARNING；配置了令牌时**不得**出现该告警。
+  **若失败是架构师实现的问题，报告而不要改期望值。**
+- `tests/test_auth.py`（追加一条）：令牌由 A 改为 B 并重建应用后，基于 A 的旧 Cookie 得
+  `401`，基于 B 的新 Cookie 得 `200`——对应 delta 规格「令牌轮换立即生效」。

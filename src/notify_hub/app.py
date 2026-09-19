@@ -68,6 +68,14 @@ def create_app(settings=None, *, ctx: AppContext | None = None) -> FastAPI:
     app.state.ctx = ctx
     # 中间件必须在应用启动前挂上；装在路由之前，两条路由都被覆盖。
     app.add_middleware(AuthGuard, token=ctx.settings.auth_token)
+    if ctx.settings.auth_token is None:
+        # design.md D4 的缓解措施之一：fail-open 默认必须**看得见**。
+        # 主缓解在仓库外的暴露脚本（未配置令牌时拒绝启动转发），这条是防御纵深。
+        ctx.logger.warning(
+            "server.auth_token 未配置：访问鉴权整体关闭，任何能连到本端口的客户端"
+            "都可以投递消息、读取待办与消息详情、执行「完成」操作。"
+            "单机本地使用可以接受；需要对外暴露请先配置令牌。"
+        )
     app.include_router(create_api_router(ctx))
     app.include_router(create_web_router(ctx))
     return app
