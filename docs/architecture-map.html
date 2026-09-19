@@ -132,7 +132,7 @@
   <!-- ===================== 不变量 ===================== -->
   <section class="view" id="v-inv">
     <div class="card" style="margin-bottom:16px">
-      <h2>四条跨模块不变量（读代码最容易踩的地方）</h2>
+      <h2>六条跨模块不变量（读代码最容易踩的地方）</h2>
       <div id="invs"></div>
     </div>
     <div class="card" style="margin-bottom:16px">
@@ -167,14 +167,16 @@
 </main>
 
 <footer>
-  内容对应提交 <code>feat/add-notify-hub</code>。契约级规格见
-  <code>openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md</code>，文字走读见 <code>docs/architecture-overview.md</code>。
+  内容对应提交 <code>feat/add-notify-hub</code>，并已同步 <code>add-public-access</code>（访问认证层）。契约级规格见
+  <code>openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md</code> 与
+  <code>openspec/changes/add-public-access/architecture.md</code>，文字走读见 <code>docs/architecture-overview.md</code>。
 </footer>
 
 <script>
 /* ------------------------------------------------------------------ 分层 */
 const LAYERS = [
   {id:"L4", title:"L4 · 入口层", mods:[
+    {id:"auth", label:"M-A auth.py", files:"AuthGuard：纯 ASGI 中间件，除 /healthz 外全路由要求凭据"},
     {id:"api", label:"M7 api/*", files:"api/schemas.py · api/messages.py · api/todos.py · api/health.py"},
     {id:"web", label:"M8 web/*", files:"web/routes.py + templates/*.html"},
     {id:"cli", label:"M5 cli.py", files:"cli.py（独立 HTTP 客户端）"}]},
@@ -202,60 +204,68 @@ const S = (n,t,d,layers,what,files,out,note,async_) => ({
   async: !!async_
 });
 const STEPS = [
-S(1,"接入","HTTP POST 到达","L4",
+S(1,"认证","所有 HTTP 入口的前置步骤","L4",
+  "除 <code>/healthz</code> 外的<b>每一个</b>路由都要求凭据——包括本身没有独立鉴权的投递入口 <code>POST /api/v1/messages</code>。<br>守卫只认 <code>?token=</code> 查询参数与会话 Cookie <code>nh_session</code>（值是令牌的 HMAC，不是令牌本身），<b>不读任何请求头</b>，所以 CLI 也走查询参数。<br>浏览器导航形态（<code>GET</code> + <code>Accept</code> 含 <code>text/html</code>）首次带 <code>?token=</code> 时，返回 <code>303</code> 到去掉令牌的同一地址并种下 Cookie；其余已认证请求直接透传。",
+  [["auth.py","AuthGuard.__call__()","判定顺序：非 HTTP 透传 → 守卫关闭透传 → /healthz 放行 → 校验查询令牌/会话 Cookie → 401 按 Accept 分型"],
+   ["auth.py","session_value(token)","会话 Cookie 值 = HMAC-SHA256(token, SESSION_MESSAGE)，小写十六进制"],
+   ["auth.py","strip_token_param()","303 的 Location 去掉全部 token 键值对，保留其余参数原有顺序"],
+   ["app.py","create_app() · add_middleware","唯一装配点（不装进 create_web_app / create_api_app）；auth_token is None 时另打一条 WARNING"]],
+  "303 + Set-Cookie nh_session（HttpOnly · Path=/ · SameSite=Lax · 不设 Secure）/ 401 / 透传",
+  "未配置 <code>server.auth_token</code> 时守卫整体关闭：全量透传是刻意的 fail-open 默认，主缓解在仓库外的暴露脚本（未配置令牌时拒绝启动转发），应用侧只有一条 WARNING。"),
+S(2,"接入","HTTP POST 到达","L4",
   "路由先做字段校验（缺必填字段 / level 非法 → 422，<b>且不落库</b>），然后把请求体转成领域层的 <code>MessageDraft</code>。",
   [["api/messages.py","post_message()","路由处理：校验通过后构造 draft"],
    ["api/schemas.py","MessageIn","Pydantic 模型，字段名即对外契约"],
    ["services/messages.py","MessageDraft","与请求体解耦的领域输入对象"]],
   "MessageDraft"),
-S(2,"受理编排","一次同步调用串起前三步",["L3","L2"],
+S(3,"受理编排","一次同步调用串起前三步",["L3","L2"],
   "受理只做四件事，全部同步完成：<b>分类 → 落库 → 生成待办 → 入队</b>。最后一步只是把 message_id 放进队列，所以接口能立刻返回 202。",
   [["pipeline.py","IngestPipeline.accept()","受理编排的唯一样例"],
    ["pipeline.py","queue.put(message_id)","run_inline=True 时改为直接 dispatch（测试用）"]],
   "AcceptOutcome(message_id, todo_id, verdict)"),
-S(3,"分类","按配置规则决定分类与是否入待办","L2",
+S(4,"分类","按配置规则决定分类与是否入待办","L2",
   "按声明顺序找<b>首个命中的规则</b>（同规则内多条件「与」、候选值「或」）；没命中就套用 defaults。<br>入待办判定：<b>调用方声明 need_ack 或 规则要求，两者冲突以「入待办」为准</b>——规则不得把调用方明确要求确认的消息降级为纯通知。",
   [["classifier/__init__.py","RuleClassifier.classify()","门面；ruleset 实时委派给 loader，故热加载立即生效"],
    ["classifier/engine.py","RuleEngine.classify()","纯函数匹配引擎"],
    ["domain.py","ClassificationVerdict","分类结论（跨模块共享类型）"]],
   "ClassificationVerdict(rule_id, category, labels, need_ack, ack_reason, preferred_channel)"),
-S(4,"落库","写入消息与其分类结论",["L2","L1"],
+S(5,"落库","写入消息与其分类结论",["L2","L1"],
   "把原始字段与分类结论一起写进 <code>messages</code>。<b>分类结论必须持久化</b>——否则规则调整后就无法回溯「这条消息当初为什么被判成要处理」。",
   [["services/messages.py","MessageService.create(draft, verdict)","写 messages 行"],
    ["db.py","Database.session()","上下文管理器；expire_on_commit=False，退出后仍可读 ORM 属性"],
    ["models.py","Message","ORM 定义（含 rule_id / category / labels / needs_ack / ack_reason）"]],
   "Message 行（含 id）"),
-S(5,"生成待办","需要人处理的才建，且要幂等","L2",
+S(6,"生成待办","需要人处理的才建，且要幂等","L2",
   "只有 <code>needs_ack</code> 为真才建待办；否则返回 <code>None</code>（纯通知，不打扰）。<br>按 <code>(source, dedup_key)</code> 去重，靠数据库的<b>部分唯一索引</b>兜底：仅约束「待完成」且跳过 NULL，所以待办完成后同样的 key 可以再建。",
   [["services/todos.py","TodoService.ensure_for_message()","建待办 + 去重"],
    ["models.py","Todo / TodoEvent","待办行 + 时间序列的第一条 created"]],
   "Todo 行 或 None"),
-S(6,"派发","入队后立即返回 202","L3",
+S(7,"派发","入队后立即返回 202","L3",
   "响应此时已经返回给调用方。真正的投递在后台线程 <code>notify-hub-ingest-worker</code> 里进行——<b>渠道慢或挂掉都不会传导成投递方进程的卡顿</b>。",
   [["pipeline.py","queue.Queue + 工作线程","单线程消费，保证投递顺序可控"],
    ["api/messages.py","status_code=202","含义是「已受理」而非「已送达」"]],
   "HTTP 202 {message_id, todo_id}"),
-S(7,"构造通知","把消息行渲染成与渠道无关的通知","L2",
+S(8,"构造通知","把消息行渲染成与渠道无关的通知","L2",
   "产出渠道无关的 <code>NotificationMessage</code>。注意 <b>body 已经是成品正文</b>——里面含「来源 / 分类 / 时间 + 空行 + 原文」，适配器只负责标题，不得再拼一遍表头。",
   [["pipeline.py","IngestPipeline.dispatch()","后台线程入口：读消息 → 构造 → 投递"],
    ["services/notifications.py","notification_for_message()","首次通知文案（正文即成品）；汇总文案另见 notification_for_digest()"],
    ["notifiers/base.py","NotificationMessage","统一消息结构（标题/正文/级别/来源/时间/超时）"]],
   "NotificationMessage",null,true),
-S(8,"选渠道并投递","首选 → 默认 → 其余，逐次记档","L2",
+S(9,"选渠道并投递","首选 → 默认 → 其余，逐次记档","L2",
   "候选渠道顺序：<b>分类指定的首选 → 配置的默认 → 其余</b>（去重保序）。首选不可用或失败就降级，并在投递记录里标注是降级及原因。<br>适配器<b>不会抛异常</b>——所有渠道侧/网络侧错误都转成失败结果。",
   [["delivery.py","DeliveryService.deliver()","渠道选择、降级、写投递记录"],
    ["notifiers/registry.py","NotifierRegistry.get()","按 channel_id 取适配器；不可用的记原因"],
    ["notifiers/feishu.py","FeishuNotifier.send()","加签 + 嵌套载荷；业务错误码非 0 也算失败"],
    ["models.py","DeliveryRecord","每一次尝试一行"]],
   "DeliveryOutcome + deliveries 行",null,true),
-S(9,"每日汇总","每天固定本地时间一条，覆盖全部未完成","L2",
+S(10,"每日汇总","每天固定本地时间一条，覆盖全部未完成","L2",
   "独立线程周期扫描本地时刻：<code>timezone</code> 下越过 <code>at</code>（默认 21:00 Asia/Shanghai）后，<b>第一轮检查就定案</b>——当时没有未完成待办则不发、当天也不再发。<br>当天投递失败会在<b>同一自然日内</b>按 <code>scan_interval_seconds</code> 重试，<b>跨天不补发</b>；「今天发没发/检查没检查」持久化在 <code>digest_runs</code>，重启不重复也不吞掉。",
   [["services/scheduler.py","ReminderScheduler.run_once()","一轮检查：本地时刻判定 → 汇总 → 逐条记账；单条出错不中断整轮"],
    ["services/digest.py","DigestService.state_for() / record()","按本地日期读写当日定案状态（唯一索引，重启安全）"],
    ["services/notifications.py","notification_for_digest(todos, now=…)","渲染「[待办汇总] N 项未完成」+ 逐条「已超时」明细，按超时时长降序"],
    ["services/todos.py","TodoService.record_reminder()","每条被覆盖的待办更新 last_notified_at / reminder_count + 写事件"]],
   "一条 deliveries(message_id=todo_id=None) + 每条待办一条 todo_events(reminder)",null,true),
-S(10,"完成","从此刻起不再提醒",["L4","L2"],
+S(11,"完成","从此刻起不再提醒",["L4","L2"],
   "两个入口共用同一套 service 方法，不存在两份业务逻辑：<b>Web 页面表单</b>与 <b>CLI <code>notify todo done</code></b>（后者走 HTTP）。<br>完成是<b>幂等</b>的：重复完成不改变原完成时间；已完成不会再回到待完成。",
   [["web/routes.py","POST /todos/{id}/done","页面表单 → 303 重定向回列表"],
    ["api/todos.py","complete_todo()","HTTP 接口（CLI 用它）"],
@@ -360,6 +370,7 @@ const MAP=[
 
  ["L3 编排层","src/notify_hub/pipeline.py","IngestPipeline：分类→落库→待办→队列/派发；工作线程生命周期"],
 
+ ["L4 入口层 · 认证","src/notify_hub/auth.py","访问认证：纯 ASGI 中间件 AuthGuard（仅标准库、不写日志）；除 /healthz 外全路由要求凭据，?token= 与会话 Cookie 二选一"],
  ["L4 入口层 · API","src/notify_hub/api/schemas.py","请求/响应 Pydantic 模型（字段名即对外契约）"],
  ["L4 入口层 · API","src/notify_hub/api/messages.py","投递、批量投递、消息详情（前缀 /api/v1/messages）"],
  ["L4 入口层 · API","src/notify_hub/api/todos.py","待办列表与完成（前缀 /api/v1/todos）"],
@@ -367,7 +378,7 @@ const MAP=[
  ["L4 入口层 · API","src/notify_hub/api/__init__.py","组装 api 路由；create_api_app 供模块测试"],
  ["L4 入口层 · Web","src/notify_hub/web/routes.py","页面路由与模板渲染；create_web_router / create_web_app"],
  ["L4 入口层 · Web","src/notify_hub/web/templates/*.html","5 个模板：布局、待办列表/详情、消息列表/详情"],
- ["L4 入口层 · CLI","src/notify_hub/cli.py","notify 命令行：投递与待办操作，只走 HTTP"],
+ ["L4 入口层 · CLI","src/notify_hub/cli.py","notify 命令行：投递与待办操作，只走 HTTP；服务端启用令牌后需 --token 或 NOTIFY_HUB_TOKEN"],
 
  ["测试","tests/conftest.py","共享 fixture（惰性导入，保证收集期不依赖未实现模块）"],
  ["测试","tests/test_config.py / test_redact.py","配置加载、脱敏（含路径 token 提取与安全阀）"],
@@ -380,6 +391,7 @@ const MAP=[
  ["测试","tests/test_web.py","页面渲染、303 重定向、XSS 转义"],
  ["测试","tests/test_cli.py","退出码 0/1/2/3、stdin 正文、endpoint 优先级"],
  ["测试","tests/test_docs_contract.py","文档契约：规则示例真加载、适配器示例真可跑、渠道文档覆盖"],
+ ["测试","tests/test_auth.py / test_cli_token.py / test_startup_warning.py","访问认证：守卫判定与 303/Cookie 交换、CLI 令牌、未配置令牌的启动告警"],
  ["测试","tests/test_integration*.py / test_e2e.py","跨模块接缝：真实 socket、真实 uvicorn、真实热加载线程"]
 ];
 
@@ -419,7 +431,13 @@ const INVS=[
   "pipeline.py · services/scheduler.py · classifier/__init__.py"],
  ["正文归属：NotificationMessage.body 已经是成品",
   "<code>notification_for_message()</code> 产出的 <code>body</code> 已含「来源 / 分类 / 时间」与空行、原文；<code>notification_for_digest()</code> 的汇总正文同样是成品（逐条明细 + 尾部提示）。<b>适配器只负责呈现层的标题，正文一律原样使用 msg.body</b>。曾因两侧各拼一层表头，导致用户看到来源/时间重复两次。",
-  "services/notifications.py · notifiers/feishu.py · notifiers/email.py"]
+  "services/notifications.py · notifiers/feishu.py · notifiers/email.py"],
+ ["认证：守卫只认查询参数与会话 Cookie，不读任何请求头",
+  "<code>AuthGuard</code> 的凭据来源只有两个：URL 查询串里的 <code>?token=</code>，以及会话 Cookie <code>nh_session</code>（值是令牌的 HMAC，<b>不是令牌本身</b>）。它<b>不读 <code>Authorization</code> 等任何请求头</b>——所以 CLI 也必须走查询参数（<code>--token</code> / <code>NOTIFY_HUB_TOKEN</code>）。比较一律 <code>hmac.compare_digest</code> 且<b>先编码为 bytes</b>。",
+  "auth.py · cli.py · app.py"],
+ ["认证：令牌未配置 = 鉴权整体关闭（刻意的 fail-open）",
+  "<code>server.auth_token</code> 为空时守卫在构造期即关闭、每请求直接透传（零开销路径）：既有测试与单机使用无需凭据。<b>主缓解不在应用里</b>——仓库外的暴露脚本在未配置令牌时拒绝启动转发；应用侧只有 <code>create_app</code> 里一条 WARNING。<b>暴露之前必须先配令牌</b>。",
+  "auth.py · app.py · config.py"]
 ];
 function renderInvs(){
   const box=$("#invs");

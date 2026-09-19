@@ -15,7 +15,8 @@
 进程投递消息  →  按配置规则分类  →  需要人处理的变成待办  →  通过渠道通知你，直到你点完成
 ```
 
-它**不做**消息队列消费者、不做投递可靠性保证（不追求 at-least-once）、不做多用户与权限体系。
+它**不做**消息队列消费者、不做投递可靠性保证（不追求 at-least-once）、不做多用户与权限体系
+（只有**单用户单令牌**的访问认证，见 §2.1.1，没有权限分级）。
 
 **技术栈**：Python 3.10 · FastAPI + Uvicorn · SQLModel/SQLite · Jinja2 · httpx · Typer · PyYAML
 
@@ -53,6 +54,20 @@ message/
 
 > **为什么组合根要独立成文件**：如果每个模块各自去 `import` 并 new 别的模块，就没人能一眼看清
 > 「谁依赖谁、启动顺序是什么」。把这些集中在 `context.py`，模块本身退化成「构造签名已固定的库」。
+
+### 2.1.1 `auth.py` —— 访问认证（纯 ASGI 中间件）
+
+| 文件 | 职责 | 关键符号 |
+|---|---|---|
+| `auth.py` | 为整个 ASGI 应用提供统一凭据校验：`?token=` 或会话 Cookie 通过即放行，否则 `401`；`/healthz` 是唯一豁免 | `AuthGuard` `session_value()` `strip_token_param()` `COOKIE_NAME` |
+
+它是一个**纯 ASGI 中间件**（`async __call__(scope, receive, send)`），**不依赖 fastapi / starlette**，
+只用标准库 `hmac` / `hashlib` / `urllib.parse` / `http.cookies` 直接构造 ASGI 响应三元组——
+刻意不继承 `BaseHTTPMiddleware`，避免它缓冲响应、干扰本应用的流式/后台投递语义。
+
+**它不写日志**：凭据系统里没有任何日志调用，避免守卫自身成为泄漏源（`auth.py` 里既没有
+`import logging`，也没有任何日志调用；令牌明文不入日志由 `logging_setup.SecretFilter` 与
+`config.credential_values()` 这两层负责）。守卫关闭时只做透传、不解析任何凭据，是一条零开销路径。
 
 ### 2.2 `db.py` / `models.py` —— 持久化
 
@@ -130,11 +145,18 @@ message/
 | `templates/messages_list.html` | 消息列表 |
 | `templates/message_detail.html` | 消息详情（分类结果 + 投递记录） |
 
+服务端配置了 `server.auth_token` 后，Web 页面与 API 一样落在守卫后面：浏览器首次带 `?token=`
+访问会拿到 `303` 与一枚会话 Cookie，此后靠 Cookie 访问（见 §4 的前置步骤）。
+
 ### 2.8 `cli.py` —— 命令行客户端
 
 给 shell 脚本 / cron 用的独立 HTTP 客户端：`notify`（投递）、`notify todo list`、`notify todo done <id>`。
 **不导入本项目任何其它模块**，只走 HTTP，因此不会绕过接入层的校验与记录逻辑。
 退出码：`0` 成功 / `1` 服务端拒绝 / `2` 用法错误 / `3` 服务不可达。
+
+服务端启用访问令牌后 CLI 会一并被 `401` 挡住：它**读不到 `config.yaml` 里的令牌**，必须由使用者
+显式给出 `--token <令牌>` 或环境变量 `NOTIFY_HUB_TOKEN`（令牌经查询参数传递，见 §5.5）。
+本次未提供令牌而收到 `401` 时，错误信息会提示这两个入口。
 
 ---
 
@@ -156,9 +178,18 @@ python -m notify_hub
                  8. MessageService / TodoService  领域服务
                  9. IngestPipeline(run_inline=False)  受理 + 后台工作线程
                 10. ReminderScheduler              每日汇总调度（注入 DigestService）
+            ├─ app.add_middleware(AuthGuard, token=settings.auth_token)
+            │    · 鉴权守卫装在**整个应用**之前，API 与 Web 两条路由都被覆盖
+            │    · 只装在 create_app 里；create_web_app / create_api_app 是模块测试用的独立应用，**不装**
+            │    · settings.auth_token is None → 守卫关闭（全量透传），并打一条 WARNING
             ├─ app.include_router(create_api_router(ctx))   API + /healthz
             └─ app.include_router(create_web_router(ctx))   Web 页面
 ```
+
+**未配置令牌时的告警**：`create_app` 在 `auth_token is None` 时，经 `ctx.logger.warning(...)`
+打出一条含「未配置」字样的 WARNING——鉴权整体关闭、任何能连到端口的客户端都能投递与读写。
+这是**刻意的 fail-open 默认**（否则既有测试与单机开发都得凭空携带凭据）；主缓解不在应用里，
+而在仓库外的暴露脚本（未配置令牌时拒绝启动转发进程），这条告警只是防御纵深。
 
 **lifespan（服务起停时的动作）**：
 
@@ -182,9 +213,31 @@ python -m notify_hub
 
 下面每一步都给出**确切的文件与函数**，可以照着断点调试。
 
+### 前置步骤：认证（所有 HTTP 入口都要先过这里）
+
+除 `/healthz` 外的**每一个**路由都要求凭据——包括 `POST /api/v1/messages`，它自己没有任何鉴权。
+
+```
+请求进来
+  └─ auth.py::AuthGuard.__call__()      ← 纯 ASGI 中间件，装在 create_app 的最外层
+       ├─ /healthz → 放行（唯一豁免，探活不需要令牌）
+       ├─ ?token=<令牌> 或会话 Cookie nh_session 正确 → 放行
+       │    · 浏览器导航（GET + Accept 含 text/html）首次带 ?token=：
+       │      303 重定向到**去掉令牌的同一地址**，并种下 nh_session
+       │      （HttpOnly + Path=/ + SameSite=Lax，**不设 Secure**——本次是纯 HTTP，
+       │       设了浏览器不会回传，功能直接坏掉）
+       │    · 命令行每次带 ?token= 不会被重定向（重定向只对 Accept: text/html 的 GET 生效）
+       └─ 否则 → 401（Accept 含 text/html 给 HTML，否则一律 JSON）
+```
+
+守卫**只认** `?token=` 查询参数与会话 Cookie，**不读任何请求头**；`server.auth_token` 未配置时
+守卫整体关闭、全部透传（见 §5.5 / §5.6）。下面每条 HTTP 入口都从这一步开始。
+
 ### 主链路（HTTP 投递一条 `need_ack=true` 的消息）
 
 ```
+⓪ 认证         auth.py::AuthGuard.__call__()   ← 见上「前置步骤」；失败即 401，链路到此为止
+                 │
 ① 接入         curl -XPOST /api/v1/messages
                  api/messages.py::post_message()
                  ├─ 校验由 schemas.py::MessageIn 完成（422 时不落库）
@@ -252,11 +305,13 @@ services/scheduler.py::ReminderScheduler._loop()      （线程 notify-hub-remin
 ```
 Web  POST /todos/{id}/done            或     CLI  notify todo done <id>
   └─ web/routes.py 的表单处理                └─ HTTP POST /api/v1/todos/{id}/done
-                                                 api/todos.py::complete_todo()
-                                                       └─ services/todos.py::TodoService.complete()
-                                                            · 记录 completed_at，写 todo_events(completed)
-                                                            · 幂等：重复完成不改变原完成时间
-                                                            · 此后不再出现在每日汇总的未完成待办里
+       ↑ 两个入口都先经 §4 的「前置步骤：认证」      ↑ 同上（CLI 带 ?token=）
+       ：Web 靠会话 Cookie；CLI 每次带 ?token=
+       └─ api/todos.py::complete_todo()
+             └─ services/todos.py::TodoService.complete()
+                  · 记录 completed_at，写 todo_events(completed)
+                  · 幂等：重复完成不改变原完成时间
+                  · 此后不再出现在每日汇总的未完成待办里
 ```
 
 ### 另外两条入口
@@ -265,11 +320,14 @@ Web  POST /todos/{id}/done            或     CLI  notify todo done <id>
 |---|---|---|
 | 批量投递 | `POST /api/v1/messages/batch` | 请求体是**裸 JSON 数组**，逐条独立处理，返回 **207** 与逐条结果 |
 | CLI 投递 | `notify --source … --title …` | `cli.py` 走 HTTP，与 curl 完全同一条链路 |
-| 健康检查 | `GET /healthz` | 只返回服务状态与时间，**不探测任何渠道** |
+| 健康检查 | `GET /healthz` | 只返回服务状态与时间，**不探测任何渠道**，且是**唯一免鉴权**的路径 |
+
+上表**除健康检查外**的每条入口都要先过 §4 的「前置步骤：认证」；`POST …?token=<令牌>` 不会被
+重定向（重定向只对 `Accept: text/html` 的 GET 生效），CLI 因此可靠地每次带令牌调用。
 
 ---
 
-## 5. 四条跨模块不变量（读代码时最容易踩的地方）
+## 5. 六条跨模块不变量（读代码时最容易踩的地方）
 
 ### 5.1 时间：从库里读出来的时间一定是「裸」的
 
@@ -306,6 +364,31 @@ SQLite 不保留时区，`DateTime(timezone=True)` 存进去的 aware 时间读�
 **适配器只负责呈现层的标题，正文一律原样使用 `msg.body`。**
 曾经的缺陷：飞书与邮件适配器各自又拼了一层表头，导致用户看到 `来源`/`时间` 重复两次。
 
+### 5.5 认证：守卫只认查询参数与会话 Cookie，不读任何请求头
+
+`auth.py::AuthGuard` 的凭据来源只有两个：URL 查询串里的 `?token=`，以及会话 Cookie
+`nh_session`（其值是 `hmac.new(token, SESSION_MESSAGE, sha256)` 的十六进制，**不是令牌本身**，
+读到 Cookie 也反推不出令牌）。它**不读 `Authorization` 等任何请求头**——所以 CLI 也必须走
+查询参数（`--token` / `NOTIFY_HUB_TOKEN`），不能自己发明一个请求头协议。
+
+比较一律用 `hmac.compare_digest`，且**先编码成 bytes**（对含非 ASCII 的 `str` 直接比较会抛
+`TypeError`）。判定成功也不一定种 Cookie：只有「GET + `Accept` 含 `text/html` + 带了查询令牌」
+这一种浏览器导航形态才 `303` 交换会话 Cookie，其余已认证请求直接透传。
+
+> 守卫的归一化与接口在 `openspec/changes/add-public-access/architecture.md` §3 冻结；
+> 走读只需记住：**查询参数与会话 Cookie 二选一，其余一律不认**。
+
+### 5.6 认证：令牌未配置 = 鉴权整体关闭（刻意的 fail-open 默认）
+
+`server.auth_token` 为空（键缺失或 YAML `null`）时，守卫在构造期就把自己置为关闭，此后每个
+请求都直接透传——不解析凭据、零开销。这是**有意选择的兼容默认**：既有测试与单机开发都基于
+「无需凭据」，改成 fail-closed 会让每个 web/api 测试都要携带凭据。
+
+代价是「配置疏漏 = 静默暴露」。因此主缓解**不在应用里**，而在仓库外的暴露脚本
+（`~/notify-hub-run/start-public.sh`：未配置令牌时**拒绝启动转发进程**）；应用侧只有
+`create_app` 里那条 WARNING。**暴露之前必须先配令牌**，否则任何能连到端口的人都能投递消息、
+读取待办与消息详情、执行「完成」操作。
+
 ---
 
 ## 6. 建议的阅读顺序
@@ -330,4 +413,4 @@ SQLite 不保留时区，`DateTime(timezone=True)` 存进去的 aware 时间读�
 - **数据流步进器** —— 点任一步骤，右侧显示「发生了什么 / 涉及哪些文件与函数 / 产出什么」，
   并在左侧架构图上高亮参与该步的模块。
 - **模块地图** —— 按分层列出全部文件与职责，支持关键字过滤。
-- **不变量与后台线程** —— 四条跨模块约定与三条常驻线程。
+- **不变量与后台线程** —— 六条跨模块约定与三条常驻线程。
