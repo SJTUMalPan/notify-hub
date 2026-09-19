@@ -50,7 +50,8 @@
 **做**：令牌校验、Cookie 换取、`/healthz` 例外、未配置令牌时透传、`401` 响应体按 `Accept` 分型。
 
 **不做**：不做限流、不做登录页、不做用户体系、不做权限分级（单用户单令牌）、
-不做 TLS、**不写日志**（凭据系统里没有任何日志调用，避免自身成为泄漏源）、
+不做 TLS、**不写日志**（凭据系统里没有任何日志调用，避免自身成为泄漏源——这条是**可静态检查**的：
+`auth.py` MUST NOT `import logging`，也不得出现任何日志调用）、
 不导入 `notify_hub.web` / `notify_hub.api`（不得与业务路由耦合）。
 
 ### 3.2 接口
@@ -92,7 +93,13 @@ class AuthGuard:
   **禁止**位置传参（`AuthGuard(T)` 会把 T 绑到 `app` 上）。
 - `app is None` 仅供纯单元测试使用（只调 `is_authorized` / `expected_cookie`）；
   此时一旦需要透传，**必须抛 `RuntimeError`**，不得静默放行。
-- `token` 为 `None` 或去空白后为空 → **守卫关闭**。
+- **归一化（冻结，构造时一次完成）**：`token` 一律按 `strip()` 归一化——`None` 或去空白后
+  为空 → 字段置 `None`、**守卫关闭**；否则字段置 `strip()` 之后的值。
+  因此 `AuthGuard(token=" T ")` 与 `AuthGuard(token="T")` **完全等价**，连
+  `expected_cookie()` 的返回值都相同。这条与 `config._parse_auth_token` 已做的 strip 保持
+  一致，避免出现「配置里 strip 了、直接构造没 strip」的两套语义。
+  **不得**把 strip 推迟到每次请求里做。
+- 不变量：`AuthGuard` 一经构造即不可变——对字段赋值抛 `dataclasses.FrozenInstanceError`。
 - 属性 `enabled -> bool`：`token` 非空即 `True`。
 - 不变量：`AuthGuard` 一经构造即不可变；不持有任何全局状态。
 - 方法 `expected_cookie() -> str`：返回 `session_value(self.token)`；守卫关闭时抛 `RuntimeError`。
@@ -170,6 +177,9 @@ class AuthGuard:
 | 正确 Cookie | `is_authorized(cookie_value=AuthGuard(token=T).expected_cookie(), query_token=None) is True` |
 | 错误 Cookie / 错误令牌 | 均为 `False`（两种错法各一条用例） |
 | 两者都错 | `False` |
+| 令牌归一化 | `AuthGuard(token=" T ").token == "T"`；且其 `expected_cookie()` 与 `AuthGuard(token="T")` 完全相同 |
+| 不可变性 | 对 `AuthGuard(token=T)` 的字段赋值抛 `dataclasses.FrozenInstanceError` |
+| 不写日志（静态） | 对 `notify_hub.auth.__file__` 指向的源码做 AST 检查：既无 `import logging`，也无任何 `logging.*` 调用 |
 
 **单元测试（阶段 0 共享文件组）**——这一组覆盖架构师在阶段 0 改的 `config.py` / `main.py`，
 语义以 §2 的两行表格为准：
@@ -267,5 +277,13 @@ def guarded_app(ctx, token):
 另补精确化 3 处（非缺陷，是架构师写得不够死）：畸形 Cookie 的可观测契约（只断言
 `401` 且非 `5xx`）、`Accept` 缺省/`*/*` 归入 JSON 分型、以及构造一律关键字。
 
-**冻结点**：R1 之后 §3 的接口即为最终版。此后任何改动都必须走「重开冻结 → 复核受影响
+**R2（阶段 A 修正轮之后，冻结前）**——测试作者报告 §3.2 未规定「非空但含首尾空白的令牌」
+如何处理。**这是架构师漏写**（`config._parse_auth_token` 已经 strip，守卫却没说，会形成两套
+语义）。裁定：**守卫在构造时 `strip()` 归一化**，与配置层一致；并顺手把两条「规格里有、
+但没写成可断言形式」的条目固化：
+
+- 不可变性 → 明确抛 `dataclasses.FrozenInstanceError`
+- 「不写日志」→ 明确为**可静态检查**的约束（不得 `import logging`、不得有日志调用）
+
+**冻结点**：R1、R2 之后 §3 的接口即为最终版。此后任何改动都必须走「重开冻结 → 复核受影响
 测试与实现」的流程。
