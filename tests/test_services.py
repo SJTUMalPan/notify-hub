@@ -1,10 +1,14 @@
-"""M6 模块测试之一：``services/messages.py`` 与 ``services/notifications.py``。
+"""M6 模块测试之一：``services/messages.py`` 与 ``services/notifications.py`` 的保留部分。
 
-覆盖 ``architecture.md`` 第 6 节「模块 M6 · 4. 验证方法」中的第 1、14、15 条，外加
+覆盖 ``architecture.md`` 第 6 节「模块 M6 · 4. 验证方法」中的第 1、15 条，外加
 ``MessageService`` 其余冻结接口（``get`` / ``list`` / ``count`` / ``deliveries`` / ``todo_for``）。
 
+``add-daily-digest`` 移除了第 14 条（单项提醒文案 = ``notification_for_message`` 的
+``kind=REMINDER`` 分支），该用例随之删除，见文件末尾「已移除用例」说明；
+汇总文案改由 ``notification_for_digest`` 负责，断言在 ``tests/test_digest.py``。
+
 **惰性导入是硬要求**（阶段 A：``notify_hub.services``、``notify_hub.db``、``notify_hub.notifiers``
-尚不存在）。本文件顶层只导入标准库、pytest 与阶段 0 的共享模块，保证 pytest 能成功
+尚不存在）。本文件顶层只导入标准库与阶段 0 的共享模块，保证 pytest 能成功
 **收集**，失败发生在运行时（``ModuleNotFoundError`` = 实现缺失）。
 
 时间一律由 ``conftest.py`` 的 ``manual_clock`` 驱动，**不得真实等待**。
@@ -14,8 +18,6 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-
-import pytest
 
 from notify_hub.clock import as_utc
 from notify_hub.domain import (
@@ -283,42 +285,19 @@ def test_format_duration_boundaries():
 
 
 # --------------------------------------------------------------------------- #
-# 规格第 4 段第 14 条：提醒文案（冻结格式）
+# 已移除用例（add-daily-digest；移除清单含 notification_for_message 的 kind=REMINDER 分支）
+#
+# - test_reminder_notification_carries_title_overdue_and_body
+#     测的是**单项提醒文案**这一已被移除的行为：标题前缀 `[待办超时 <时长>]`、正文里的
+#     `已超时:` / `待办 id:` 行、`meta` 里的 todo_id / message_id / reminder_count。
+#     汇总改由 notification_for_digest 负责（断言在 tests/test_digest.py 第 14–17 条），
+#     旧模型下已无任何调用方以 kind=REMINDER 调用 notification_for_message。
+#     这是「移除特性」，不是为了让新代码通过而删测试。
+#
+# 本次保留（未被移除）：
+# - format_duration 边界用例（第 15 条）：汇总文案仍复用它。
+# - notification_for_message(kind=FIRST_NOTICE) 用例：首次通知文案不变。
 # --------------------------------------------------------------------------- #
-def test_reminder_notification_carries_title_overdue_and_body(tmp_path, manual_clock):
-    db = _db(tmp_path)
-    messages = _messages(db, manual_clock)
-    todos = _todos(db, manual_clock)
-
-    row = _persisted(messages)
-    todo = todos.ensure_for_message(row)
-    assert todo is not None
-
-    manual_clock.advance(7500)  # 2 小时 5 分钟
-    now = manual_clock.now()
-    reminder = _notification(row, kind=DeliveryEvent.REMINDER, now=now, todo=todo)
-
-    assert reminder.kind is DeliveryEvent.REMINDER
-    expected_overdue = (now - as_utc(todo.first_notified_at)).total_seconds()
-    assert expected_overdue == pytest.approx(7500.0)
-    assert reminder.overdue_seconds == pytest.approx(expected_overdue)
-
-    # 标题 MUST 同时含待办标题与超时时长
-    assert todo.title in reminder.title
-    assert "待办超时" in reminder.title
-    assert "小时" in reminder.title
-
-    # 正文依次含来源、分类、已超时、待办 id、空行、原始消息正文
-    assert "来源: db-backup" in reminder.body
-    assert "分类: backup-failure" in reminder.body
-    assert "已超时:" in reminder.body
-    assert f"待办 id: {todo.id}" in reminder.body
-    assert "\n\n" in reminder.body
-    assert reminder.body.rstrip().endswith("exit code 1")
-
-    assert reminder.meta["todo_id"] == todo.id
-    assert reminder.meta["message_id"] == todo.message_id
-    assert reminder.meta["reminder_count"] == todo.reminder_count
 
 
 def test_first_notice_notification_basics(tmp_path, manual_clock):

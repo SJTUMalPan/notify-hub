@@ -1,21 +1,24 @@
-"""M6 模块测试之二：``services/todos.py`` 与 ``services/scheduler.py``。
+"""M6 模块测试之二：``services/todos.py`` **保留下来**的接口。
 
-覆盖 ``architecture.md`` 第 6 节「模块 M6 · 4. 验证方法」中的第 2–13、16、17 条。
+``add-daily-digest`` 把「单项超时间隔提醒」整体替换为「每日汇总」，因此本文件只保留
+仍然成立的 M6 行为：待办生成/去重、完成幂等、列表排序、详情时间序列、逐条记账。
+被移除的单项提醒用例集中在文件末尾的「已移除用例」注释里（逐条写明它测的是哪个已移除行为，
+便于评审者区分「移除特性」与「为过测试而删测试」）。
+
+每日汇总的调度语义（``ReminderScheduler.run_once`` / ``DigestService``）在
+``tests/test_digest.py``；本文件不再构造 ``ReminderScheduler``。
 
 **惰性导入是硬要求**（阶段 A：``notify_hub.services``、``notify_hub.db``、``notify_hub.notifiers``
-尚不存在）。本文件顶层只导入标准库、pytest 与阶段 0 的共享模块，保证 pytest 能成功
-**收集**，失败发生在运行时（``ModuleNotFoundError`` = 实现缺失）。
+尚不存在）。本文件顶层只导入标准库与阶段 0 的共享模块，保证 pytest 能成功**收集**，
+失败发生在运行时（``ModuleNotFoundError`` = 实现缺失）。
 
-时间一律由 ``conftest.py`` 的 ``manual_clock`` 驱动，**禁止任何真实等待**（架构硬要求：
-这两个测试文件中不得出现真实的休眠调用）。
+时间一律由 ``conftest.py`` 的 ``manual_clock`` 驱动，**禁止任何真实等待**。
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import timedelta
-
-import pytest
 
 from notify_hub.clock import as_utc
 from notify_hub.domain import (
@@ -125,16 +128,6 @@ def _ensure_todo_at(messages, todos, clock, moment, *, source: str, **kwargs):
     return todos.ensure_for_message(_ack_message(messages, source=source, **kwargs))
 
 
-def _reminder_settings(*, scan: float = 1.0, first: float = 60.0, interval: float = 120.0):
-    from notify_hub.config import ReminderSettings
-
-    return ReminderSettings(
-        scan_interval_seconds=scan,
-        first_reminder_after_seconds=first,
-        reminder_interval_seconds=interval,
-    )
-
-
 class _RecordingNotifier:
     """M6 测试的局部投递替身：记录每次 ``send()`` 的入参，返回可配置结果。"""
 
@@ -166,29 +159,6 @@ class _RecordingNotifier:
         return DeliveryResult.failure(self.error_reason)
 
 
-class _ExplodingDelivery:
-    """包装真实 ``DeliveryService``：第一次 ``deliver()`` 抛异常，之后委派。
-
-    规格第 4 段第 17 条要求「单条待办异常不得中断整轮」。M4 的 ``deliver()`` 按契约不抛异常，
-    所以这里用投递替身在**边界上**注入一次真实异常，验证 scheduler 的隔离逻辑。
-    """
-
-    def __init__(self, inner) -> None:
-        self._inner = inner
-        self.calls = 0
-
-    def deliver(self, msg, *, preferred_channel=None, message_id=None, todo_id=None):
-        self.calls += 1
-        if self.calls == 1:
-            raise RuntimeError("模拟投递期间的意外异常")
-        return self._inner.deliver(
-            msg,
-            preferred_channel=preferred_channel,
-            message_id=message_id,
-            todo_id=todo_id,
-        )
-
-
 def _delivery(db, clock, notifier, *, default_channel: str | None = None):
     from notify_hub.delivery import DeliveryService
     from notify_hub.notifiers import NotifierRegistry
@@ -202,14 +172,6 @@ def _delivery(db, clock, notifier, *, default_channel: str | None = None):
         channel_order=registry.ids(),
         clock=clock,
         logger=LOG,
-    )
-
-
-def _scheduler(todos, delivery, clock, settings):
-    from notify_hub.services.scheduler import ReminderScheduler
-
-    return ReminderScheduler(
-        todos=todos, delivery=delivery, clock=clock, settings=settings, logger=LOG
     )
 
 
@@ -399,22 +361,40 @@ def test_list_orders_by_overdue_desc_and_filters_by_status(tmp_path, manual_cloc
 
 
 # --------------------------------------------------------------------------- #
-# 规格第 4 段第 9 条：详情（事件时间序列 + 投递记录）
+# 规格第 4 段第 9 条：详情（事件时间序列；汇总投递不归属于单条待办）
 # --------------------------------------------------------------------------- #
-def test_detail_contains_event_timeline_and_deliveries(tmp_path, manual_clock):
+def test_detail_contains_event_timeline_and_unattributed_digest_delivery(
+    tmp_path, manual_clock
+):
+    """``TodoService.detail`` 仍然成立的部分。
+
+    改写说明：原用例用「单项提醒调度」制造 2 条挂在待办上的投递记录。``add-daily-digest``
+    之后不再有「按待办投递」，汇总的投递记录 ``message_id=None`` / ``todo_id=None``
+    （架构 3.3 决策 5），因此断言改为「时间序列仍完整」+「汇总记录不出现在待办详情里」，
+    而不是删掉这条覆盖。
+    """
+    from notify_hub.services.notifications import notification_for_digest
+
     db = _db(tmp_path)
     messages, todos = _services(db, manual_clock)
-    settings = _reminder_settings(first=60, interval=120, scan=1)
-    delivery = _delivery(db, manual_clock, _RecordingNotifier())
-    scheduler = _scheduler(todos, delivery, manual_clock, settings)
+    _, _, DeliveryRecord = _models()
+    delivery = _delivery(db, manual_clock, _RecordingNotifier(), default_channel="recording")
 
     todo = todos.ensure_for_message(_ack_message(messages))
     assert todo is not None
 
-    manual_clock.advance(61)
-    assert scheduler.run_once() == 1
+    manual_clock.advance(3600)
+    todos.record_reminder(todo.id, delivered=True, channel_id="recording")
     manual_clock.advance(120)
-    assert scheduler.run_once() == 1
+    todos.record_reminder(todo.id, delivered=True, channel_id="recording")
+
+    # 一次真实的汇总投递：该记录不归属任何单条待办
+    digest_message = notification_for_digest(todos.list(), now=manual_clock.now())
+    outcome = delivery.deliver(
+        digest_message, preferred_channel=None, message_id=None, todo_id=None
+    )
+    assert outcome.ok is True
+
     manual_clock.advance(5)
     assert todos.complete(todo.id).status == "completed"
 
@@ -426,179 +406,84 @@ def test_detail_contains_event_timeline_and_deliveries(tmp_path, manual_clock):
         TodoEventKind.CREATED.value,
         TodoEventKind.REMINDER.value,
         TodoEventKind.REMINDER.value,
-        "completed",
+        TodoEventKind.COMPLETED.value,
     ]
     event_times = [as_utc(e.occurred_at) for e in detail.events]
     assert event_times == sorted(event_times)
 
-    assert len(detail.deliveries) == 2
-    assert all(record.todo_id == todo.id for record in detail.deliveries)
-    delivery_times = [as_utc(record.attempted_at) for record in detail.deliveries]
-    assert delivery_times == sorted(delivery_times)
+    # 汇总那条记录确实存在，但不按 todo_id 归属，故不出现在待办详情里
+    assert detail.deliveries == ()
+    all_records = _rows(db, DeliveryRecord)
+    assert len(all_records) == 1
+    assert all_records[0].todo_id is None
+    assert all_records[0].message_id is None
 
     assert todos.detail(99999) is None
 
 
 # --------------------------------------------------------------------------- #
-# 规格第 4 段第 10 条：超时判定门槛
+# 逐条记账（保留接口 ``record_reminder``；原先只被单项提醒用例间接覆盖）
 # --------------------------------------------------------------------------- #
-def test_due_for_reminder_respects_first_threshold(tmp_path, manual_clock):
+def test_record_reminder_updates_time_count_and_writes_event(tmp_path, manual_clock):
     db = _db(tmp_path)
     messages, todos = _services(db, manual_clock)
-    settings = _reminder_settings(first=60, interval=120, scan=1)
 
     todo = todos.ensure_for_message(_ack_message(messages))
     assert todo is not None
 
-    manual_clock.advance(59)
-    assert todos.due_for_reminder(settings=settings) == []
+    manual_clock.advance(90)
+    moment = manual_clock.now()
+    todos.record_reminder(todo.id, delivered=True, channel_id="recording")
 
-    manual_clock.advance(2)  # 累计 61 秒 >= 60
-    due = todos.due_for_reminder(settings=settings)
-    assert [t.id for t in due] == [todo.id]
-
-
-# --------------------------------------------------------------------------- #
-# 规格第 4 段第 11 条：提醒与节奏
-# --------------------------------------------------------------------------- #
-def test_run_once_reminds_then_waits_for_the_interval(tmp_path, manual_clock):
-    db = _db(tmp_path)
-    messages, todos = _services(db, manual_clock)
-    _, TodoEvent, _ = _models()
-    settings = _reminder_settings(first=60, interval=120, scan=1)
-    notifier = _RecordingNotifier()
-    delivery = _delivery(db, manual_clock, notifier)
-    scheduler = _scheduler(todos, delivery, manual_clock, settings)
-
-    todo = todos.ensure_for_message(_ack_message(messages))
-    assert todo is not None
-
-    manual_clock.advance(61)
-    reminded_at = manual_clock.now()
-    assert scheduler.run_once() == 1
-
-    assert len(notifier.sent) == 1
-    assert notifier.sent[0].overdue_seconds == pytest.approx(61.0)
     current = todos.get(todo.id)
-    assert as_utc(current.last_notified_at) == reminded_at
     assert current.reminder_count == 1
-    assert len(_reminder_events(db, todo.id)) == 1
-
-    # 未到间隔不打扰
-    manual_clock.advance(119)
-    assert scheduler.run_once() == 0
-    assert todos.get(todo.id).reminder_count == 1
-    assert len(_reminder_events(db, todo.id)) == 1
-
-    manual_clock.advance(2)  # 累计距上次通知 121 秒 >= 120
-    assert scheduler.run_once() == 1
-    assert todos.get(todo.id).reminder_count == 2
-    assert len(_reminder_events(db, todo.id)) == 2
-
-
-# --------------------------------------------------------------------------- #
-# 规格第 4 段第 12 条：完成后不再提醒
-# --------------------------------------------------------------------------- #
-def test_completed_todo_is_never_reminded(tmp_path, manual_clock):
-    db = _db(tmp_path)
-    messages, todos = _services(db, manual_clock)
-    _, TodoEvent, _ = _models()
-    settings = _reminder_settings(first=60, interval=120, scan=1)
-    notifier = _RecordingNotifier()
-    delivery = _delivery(db, manual_clock, notifier)
-    scheduler = _scheduler(todos, delivery, manual_clock, settings)
-
-    todo = todos.ensure_for_message(_ack_message(messages))
-    assert todo is not None
-
-    manual_clock.advance(30)  # 门槛（60）之前完成
-    assert todos.complete(todo.id).status == "completed"
-
-    manual_clock.advance(10000)
-    assert scheduler.run_once() == 0
-    assert todos.due_for_reminder(settings=settings) == []
-    kinds = [e.kind for e in _rows(db, TodoEvent) if e.todo_id == todo.id]
-    assert TodoEventKind.REMINDER.value not in kinds
-    assert notifier.sent == []
-
-
-# --------------------------------------------------------------------------- #
-# 规格第 4 段第 13 条：提醒失败仍按间隔重试
-# --------------------------------------------------------------------------- #
-def test_failed_reminder_retries_on_next_cycle(tmp_path, manual_clock):
-    db = _db(tmp_path)
-    messages, todos = _services(db, manual_clock)
-    _, _, DeliveryRecord = _models()
-    settings = _reminder_settings(first=60, interval=120, scan=1)
-    notifier = _RecordingNotifier(ok=False, error_reason="渠道不可用")
-    delivery = _delivery(db, manual_clock, notifier)
-    scheduler = _scheduler(todos, delivery, manual_clock, settings)
-
-    todo = todos.ensure_for_message(_ack_message(messages))
-    assert todo is not None
-
-    manual_clock.advance(61)
-    failed_at = manual_clock.now()
-    assert scheduler.run_once() == 1
-
-    current = todos.get(todo.id)
+    assert as_utc(current.last_notified_at) == moment
     assert current.status == TodoStatus.PENDING
-    assert as_utc(current.last_notified_at) == failed_at  # 与投递成败无关
-    assert current.reminder_count == 1
 
-    records = [r for r in _rows(db, DeliveryRecord) if r.todo_id == todo.id]
-    assert len(records) == 1
-    assert records[0].ok is False
-    assert records[0].error_reason
+    events = _reminder_events(db, todo.id)
+    assert len(events) == 1
+    assert events[0].channel_id == "recording"
+    assert events[0].delivery_ok is True
+    assert as_utc(events[0].occurred_at) == moment
 
-    manual_clock.advance(120)
-    assert scheduler.run_once() == 1
+    # 再次记账是累加（不再有「距上次通知 ≥ 间隔」的门槛判定）
+    manual_clock.advance(10)
+    later = manual_clock.now()
+    todos.record_reminder(todo.id, delivered=False, channel_id="recording")
     assert todos.get(todo.id).reminder_count == 2
+    assert as_utc(todos.get(todo.id).last_notified_at) == later
     assert len(_reminder_events(db, todo.id)) == 2
-    assert todos.get(todo.id).status == TodoStatus.PENDING
 
 
 # --------------------------------------------------------------------------- #
-# 规格第 4 段第 16 条：同一轮内至多提醒一次
+# 已移除用例（add-daily-digest；规格 REMOVED「超时判定与重复提醒」）
+#
+# 下列用例随「单项超时间隔提醒」特性一并移除。逐条登记它测的是哪个被移除的行为，
+# 便于评审者区分「移除特性」与「为让新代码通过而删测试」：
+#
+# - test_due_for_reminder_respects_first_threshold
+#     测 ``TodoService.due_for_reminder`` 的「首次提醒门槛」
+#     （``reminders.first_reminder_after_seconds``）；该方法与配置键已被架构 3.2 / 3.4
+#     第 26 条明确删除。
+# - test_run_once_reminds_then_waits_for_the_interval
+#     测单项提醒的「距上次通知 ≥ ``reminder_interval_seconds``」节奏；规格 REMOVED 明确
+#     「不再有『距上次通知 ≥ 间隔』的判定」。
+# - test_completed_todo_is_never_reminded
+#     以 ``due_for_reminder`` 为断言入口测「完成后不再提醒」；该性质在新模型下由
+#     ``tests/test_digest.py`` 第 21 条（次日汇总只覆盖仍未完成者）覆盖。
+# - test_failed_reminder_retries_on_next_cycle
+#     测单项提醒失败后按间隔重试；新语义是「同一自然日内重试、跨天不补发」，
+#     由 ``tests/test_digest.py`` 第 22 / 23 条覆盖。
+# - test_run_once_reminds_at_most_once_per_round
+#     测单项提醒「一轮至多一次」；新模型每天只发一条汇总，
+#     由 ``tests/test_digest.py`` 第 18 条覆盖。
+# - test_single_todo_failure_does_not_abort_the_round
+#     测单项投递异常不中断整轮；新模型的隔离点是「单条待办记账失败」，
+#     由 ``tests/test_digest.py`` 第 25 条覆盖。
+#
+# 同时删除的死代码：``_reminder_settings``（旧 ReminderSettings 三键）、``_scheduler``
+# （旧 ReminderScheduler 签名）、``_ExplodingDelivery``（只服务于上面最后一条用例）。
 # --------------------------------------------------------------------------- #
-def test_run_once_reminds_at_most_once_per_round(tmp_path, manual_clock):
-    db = _db(tmp_path)
-    messages, todos = _services(db, manual_clock)
-    settings = _reminder_settings(first=60, interval=120, scan=1)
-    delivery = _delivery(db, manual_clock, _RecordingNotifier())
-    scheduler = _scheduler(todos, delivery, manual_clock, settings)
-
-    todo = todos.ensure_for_message(_ack_message(messages))
-    assert todo is not None
-
-    manual_clock.advance(3600)  # 远远超过多个间隔，不得成批补发
-    assert scheduler.run_once() == 1
-    assert todos.get(todo.id).reminder_count == 1
-    assert len(_reminder_events(db, todo.id)) == 1
 
 
-# --------------------------------------------------------------------------- #
-# 规格第 4 段第 17 条：单条异常不中断整轮（异常场景 b）
-# --------------------------------------------------------------------------- #
-def test_single_todo_failure_does_not_abort_the_round(tmp_path, manual_clock):
-    db = _db(tmp_path)
-    messages, todos = _services(db, manual_clock)
-    _, TodoEvent, _ = _models()
-    settings = _reminder_settings(first=60, interval=120, scan=1)
-    inner = _delivery(db, manual_clock, _RecordingNotifier())
-    exploding = _ExplodingDelivery(inner)
-    scheduler = _scheduler(todos, exploding, manual_clock, settings)
 
-    first = todos.ensure_for_message(_ack_message(messages, source="s-first", title="第一条"))
-    second = todos.ensure_for_message(_ack_message(messages, source="s-second", title="第二条"))
-    assert first is not None and second is not None
-
-    manual_clock.advance(61)
-    assert scheduler.run_once() == 1  # 不抛异常，且另一条仍被提醒
-
-    reminders = [e for e in _rows(db, TodoEvent) if e.kind == TodoEventKind.REMINDER.value]
-    assert len(reminders) == 1
-    counts = sorted(todos.get(t.id).reminder_count for t in (first, second))
-    assert counts == [0, 1]
-    for todo in (first, second):
-        assert todos.get(todo.id).status == TodoStatus.PENDING

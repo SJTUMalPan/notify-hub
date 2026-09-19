@@ -17,7 +17,7 @@ pytest 与阶段 0 的共享模块。所有对 ``notify_hub.web`` 的导入都�
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -364,15 +364,38 @@ def test_post_done_redirects_to_todos_and_completes(ctx, manual_clock, client):
 # 规格第 4 段第 5 条：详情时间序列（创建 → 2 次提醒 → 完成）
 # --------------------------------------------------------------------------- #
 def test_todo_detail_renders_event_timeline_and_deliveries(ctx, manual_clock, client):
-    """4 个事件按时间顺序出现，且页面含渠道 id 与投递结果。"""
+    """创建 → **两个自然日各一次**汇总提醒 → 完成：4 个事件按时间顺序出现，页面含渠道与结果。
+
+    **改写自旧的「同一自然日按间隔提醒两次」场景（已随 add-daily-digest 移除）。**
+    旧断言：``advance(61)`` 与 ``advance(120)`` 各得 ``run_once() == 1``，即同一自然日内按
+    ``reminder_interval_seconds`` 重复提醒。新模型按**本地日期**去重，同一自然日绝不发第二次，
+    该场景不存在；因此改为**跨两个自然日各一次**汇总（与
+    ``test_integration_web.py::test_web_detail_audit_timeline_after_real_digests`` 同思路），
+    并补一条防回归断言：同一自然日内再跑一轮必须返回 0。断言方向只加强不放松。
+    """
+    from sqlmodel import select  # 惰性
+
     from notify_hub.domain import TodoEventKind  # 惰性（阶段 0 共享）
+    from notify_hub.models import DeliveryRecord  # 惰性
+
+    zone = ctx.settings.reminders.zone
+    trigger = ctx.settings.reminders.trigger_time
 
     _, todo = _accept(ctx, manual_clock)
 
-    manual_clock.advance(61)
+    # ---- 第 1 个自然日（本地 2024-01-01 21:00）：一次汇总 ----
+    manual_clock.set(datetime.combine(date(2024, 1, 1), trigger, tzinfo=zone))
     assert ctx.scheduler.run_once() == 1
-    manual_clock.advance(120)
+
+    # 防回归（被替换掉的旧场景所违背的约束）：同一自然日稍后（本地 22:00）再跑一轮必须返回 0，
+    # 且不得新增任何投递记录。
+    manual_clock.advance(3600)
+    assert ctx.scheduler.run_once() == 0
+
+    # ---- 第 2 个自然日（本地 2024-01-02 21:00）：再一次汇总 ----
+    manual_clock.set(datetime.combine(date(2024, 1, 2), trigger, tzinfo=zone))
     assert ctx.scheduler.run_once() == 1
+
     manual_clock.advance(5)
     assert ctx.todos.complete(todo.id).status == "completed"
 
@@ -384,7 +407,32 @@ def test_todo_detail_renders_event_timeline_and_deliveries(ctx, manual_clock, cl
         TodoEventKind.REMINDER.value,
         TodoEventKind.COMPLETED.value,
     ]
-    assert len(detail.deliveries) == 2
+    assert detail.todo.reminder_count == 2
+    # 两次提醒分属**两个不同的本地自然日**（新模型的核心约束）。
+    reminder_dates = [
+        as_utc(event.occurred_at).astimezone(zone).date()
+        for event in detail.events
+        if event.kind == TodoEventKind.REMINDER.value
+    ]
+    assert reminder_dates == [date(2024, 1, 1), date(2024, 1, 2)]
+
+    # 新模型：汇总以 ``todo_id=None`` 投递，因此该待办名下**没有**投递记录；
+    # 渠道与投递结果由时间序列的「渠道/投递结果」两列承载（见下方页面断言）。
+    assert len(detail.deliveries) == 0
+
+    # 全局对账（加强）：恰好 2 条 reminder 投递记录，均不归属任何待办/消息，渠道与结果正确。
+    with ctx.db.session() as session:
+        records = list(
+            session.exec(
+                select(DeliveryRecord)
+                .where(DeliveryRecord.event == "reminder")
+                .order_by(DeliveryRecord.id.asc())
+            ).all()
+        )
+    assert len(records) == 2
+    assert all(record.todo_id is None and record.message_id is None for record in records)
+    assert all(record.channel_id == "recording" for record in records)
+    assert all(record.ok is True for record in records)
 
     response = client.get(f"/todos/{todo.id}")
     assert response.status_code == 200

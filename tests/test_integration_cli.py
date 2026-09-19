@@ -43,8 +43,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 _SLOW_REMINDERS = {
     "scan_interval_seconds": 3600,
-    "first_reminder_after_seconds": 3600,
-    "reminder_interval_seconds": 3600,
+    "at": "21:00",
+    "timezone": "Asia/Shanghai",
 }
 
 

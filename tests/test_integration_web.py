@@ -10,7 +10,7 @@
 2. Web 列表页的真实 ``<form method="post" action="/todos/{id}/done">`` → ``ctx.todos.complete``
    → SQLite：303 → ``Location: /todos``，``ctx.todos.get()`` 状态为 done，列表页与 API 同步变化。
 3. Web 详情页 → ``TodoService.detail`` → ``todo_events``/``deliveries``：真实链路（受理 →
-   提醒 → 页面完成）后，审计时间序列按升序渲染。
+   **跨两个自然日的每日汇总** → 页面完成）后，审计时间序列按升序渲染。
 
 唯一允许的进程外替身是本机 ``http.server.ThreadingHTTPServer``（webhook 桩渠道）。
 
@@ -24,6 +24,7 @@ import json
 import re
 import threading
 import time
+from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -41,8 +42,17 @@ _HUB_THREAD_PREFIX = "notify-hub-"
 
 _SHORT_REMINDERS = {
     "scan_interval_seconds": 1,
-    "first_reminder_after_seconds": 2,
-    "reminder_interval_seconds": 3,
+    "at": "21:00",
+    "timezone": "Asia/Shanghai",
+}
+
+#: 需要**自己驱动** ``run_once()`` 的用例用这一组：扫描周期取上限 3600，使
+#: ``ReminderScheduler`` 的后台线程不会在测试推进时钟后抢跑，从而让「第 N 天这一轮」由
+#: 测试精确触发。调度器本身仍是真货（同一个 ``run_once()`` 代码路径）。
+_DIGEST_REMINDERS = {
+    "scan_interval_seconds": 3600,
+    "at": "21:00",
+    "timezone": "Asia/Shanghai",
 }
 
 
@@ -126,7 +136,7 @@ def webhook_stub():
 # --------------------------------------------------------------------------- #
 # 真实配置装配（M1 load_settings，凭据经环境变量解析）
 # --------------------------------------------------------------------------- #
-def _make_settings(tmp_path: Path, webhook_url: str):
+def _make_settings(tmp_path: Path, webhook_url: str, *, reminders: dict | None = None):
     (tmp_path / "rules.yaml").write_text(
         yaml.safe_dump(
             {
@@ -148,7 +158,7 @@ def _make_settings(tmp_path: Path, webhook_url: str):
         "server": {"host": "127.0.0.1", "port": 8000, "log_level": "INFO"},
         "storage": {"db_path": "./data/notify.db"},
         "rules": {"path": "./rules.yaml", "poll_interval_seconds": 5},
-        "reminders": dict(_SHORT_REMINDERS),
+        "reminders": dict(reminders or _SHORT_REMINDERS),
         "default_channel": "hook",
         "channels": [
             {
@@ -287,12 +297,26 @@ def test_web_done_form_completes_todo_through_service_and_db(tmp_path, webhook_s
 
 
 # --------------------------------------------------------------------------- #
-# 3. 超时提醒后经真实页面完成；详情页审计时间序列（真实 service 链路）
+# 3. 跨两个自然日各发一次每日汇总后经真实页面完成；详情页审计时间序列
+#
+#    **改写自 ``test_web_detail_audit_timeline_after_real_reminders``（场景替换，不是放宽）。**
+#    旧场景依赖已被移除的语义：同一条待办在**同一自然日内**按 +2s / +3s 的单项间隔连发两次提醒。
+#    ``add-daily-digest`` 之后「同一自然日绝不发第二次汇总」，旧场景在新模型下不可能发生。
+#    新场景覆盖同样的接缝（真实 Web 页面 + 真实 SQLite + 真实
+#    ``ReminderScheduler``/``DeliveryService`` → 真实 socket），但把「同日两次」换成新模型下
+#    真实可发生的「**跨两个本地自然日各一次汇总**」，并补上旧约束的防回归断言。
 # --------------------------------------------------------------------------- #
-def test_web_detail_audit_timeline_after_real_reminders(tmp_path, webhook_stub, manual_clock):
-    settings = _make_settings(tmp_path, webhook_stub.url)
+def test_web_detail_audit_timeline_after_real_digests(tmp_path, webhook_stub, manual_clock):
+    # scan_interval=3600：后台扫描线程不在本轮抢跑，跨天由测试用 run_once() 精确触发。
+    settings = _make_settings(
+        tmp_path, webhook_stub.url, reminders=_DIGEST_REMINDERS
+    )
     ctx = build_context(settings, clock=manual_clock)
     app = create_app(ctx=ctx)
+
+    zone = settings.reminders.zone
+    day1_trigger = datetime.combine(date(2024, 1, 1), settings.reminders.trigger_time, tzinfo=zone)
+    day2_trigger = datetime.combine(date(2024, 1, 2), settings.reminders.trigger_time, tzinfo=zone)
 
     with TestClient(app, follow_redirects=False) as client:
         accepted = client.post(
@@ -308,20 +332,71 @@ def test_web_detail_audit_timeline_after_real_reminders(tmp_path, webhook_stub, 
         )
         assert accepted.status_code == 202
         todo_id = accepted.json()["todo_id"]
+        # 首次通知（由受理 worker 线程经真实 socket 投递）——不是汇总。
         assert webhook_stub.wait_for(1, timeout=5.0) is True
+        assert webhook_stub.count() == 1
+        assert webhook_stub.payloads()[0]["kind"] == "first_notice"
 
-        created_event = ctx.todos.detail(todo_id).events[0].occurred_at
+        events_before = ctx.todos.detail(todo_id).events
+        assert [event.kind for event in events_before] == ["created"]
+        created_event = events_before[0].occurred_at
 
-        # 两次提醒（真实 DeliveryService → webhook 桩）
-        manual_clock.advance(2)
+        # ---- 第 1 个自然日（本地 2024-01-01 21:00）：发出第 1 次汇总 ----
+        manual_clock.set(day1_trigger)
         assert ctx.scheduler.run_once() == 1
         assert webhook_stub.wait_for(2, timeout=5.0) is True
+        assert webhook_stub.count() == 2, "第 1 天汇总必须恰好新增一条请求"
         first_reminder = ctx.todos.detail(todo_id).events[1].occurred_at
+        assert ctx.todos.detail(todo_id).events[1].kind == "reminder"
+        assert ctx.todos.detail(todo_id).todo.reminder_count == 1
 
-        manual_clock.advance(3)
+        # 防回归（旧场景被替换掉的那条约束）：同一自然日稍后（本地 22:00）再跑一轮必须返回 0，
+        # webhook 端不得新增请求。
+        manual_clock.advance(3600)
+        assert ctx.scheduler.run_once() == 0
+        assert webhook_stub.count() == 2
+
+        # ---- 第 2 个自然日（本地 2024-01-02 21:00）：发出第 2 次汇总 ----
+        manual_clock.set(day2_trigger)
         assert ctx.scheduler.run_once() == 1
         assert webhook_stub.wait_for(3, timeout=5.0) is True
-        second_reminder = ctx.todos.detail(todo_id).events[2].occurred_at
+        assert webhook_stub.count() == 3, "第 2 天汇总必须恰好新增一条请求"
+        events_after_day2 = ctx.todos.detail(todo_id).events
+        assert [event.kind for event in events_after_day2] == [
+            "created",
+            "reminder",
+            "reminder",
+        ]
+        assert events_after_day2[2].kind == "reminder"
+        second_reminder = events_after_day2[2].occurred_at
+        assert ctx.todos.detail(todo_id).todo.reminder_count == 2
+
+        # 两次汇总各是一条独立请求，正文都含该待办；都不归属任何单条待办。
+        digest_payloads = [
+            payload for payload in webhook_stub.payloads() if payload["kind"] == "reminder"
+        ]
+        assert len(digest_payloads) == 2
+        assert all("备份失败" in payload["body"] for payload in digest_payloads)
+        assert all(payload["todo_id"] is None for payload in digest_payloads)
+
+        # 两个提醒时刻分属**两个不同的本地自然日**（新模型的核心约束）。
+        local_dates = [
+            as_utc(moment).astimezone(zone).date()
+            for moment in (first_reminder, second_reminder)
+        ]
+        assert local_dates == [date(2024, 1, 1), date(2024, 1, 2)]
+
+        # 与持久化的每日状态对账：两个 local_date 各一行、均已投递、fired_at 即提醒时刻。
+        for expected_date, moment in zip(local_dates, (first_reminder, second_reminder)):
+            state = ctx.digest.state_for(expected_date)
+            assert state is not None, expected_date
+            assert state.delivered is True
+            assert state.fired_at is not None
+            assert as_utc(state.fired_at) == as_utc(moment)
+
+        # 第 2 天同日再跑一轮同样返回 0（跨天后也不重复）。
+        assert ctx.scheduler.run_once() == 0
+        assert webhook_stub.count() == 3
 
         # 经真实页面表单完成
         listing = client.get("/todos")
@@ -339,6 +414,7 @@ def test_web_detail_audit_timeline_after_real_reminders(tmp_path, webhook_stub, 
         assert "exit code 1" in html
         assert "db-backup" in html
         assert "error" in html
+        assert "提醒次数" in html
 
         # 审计时间序列必须按时间升序渲染（创建 < 第 1 次提醒 < 第 2 次提醒 < 完成）
         events = ctx.todos.detail(todo_id).events
@@ -351,15 +427,19 @@ def test_web_detail_audit_timeline_after_real_reminders(tmp_path, webhook_stub, 
         occurred = [as_utc(event.occurred_at) for event in events]
         assert occurred == sorted(occurred)
         assert occurred[0] == as_utc(created_event)
-        assert occurred[1] == as_utc(first_reminder)
-        assert occurred[2] == as_utc(second_reminder)
+        assert occurred[1] == as_utc(day1_trigger)
+        assert occurred[2] == as_utc(day2_trigger)
 
-        # 只取「状态变更时间序列」表格内的文本，避免其它区块的同名时间干扰
+        # 只取「状态变更时间序列」表格内的文本（收窄到「待办」小节之前，避免
+        # 「提醒次数」这类同名文本混入），避免其它区块的同名时间干扰
         start = html.index("状态变更时间序列")
-        end = html.index("原始消息", start)
+        end = html.index("<h2>待办</h2>", start)
         timeline = html[start:end]
         rendered = [event.occurred_at.strftime("%Y-%m-%d %H:%M:%S") for event in events]
         positions = [timeline.find(text) for text in rendered]
         assert all(position >= 0 for position in positions), (rendered, timeline)
         assert positions == sorted(positions), (rendered, positions)
+        assert positions[1] < positions[2], (rendered, positions)
         assert "创建" in timeline and "提醒" in timeline and "完成" in timeline
+        # 两次提醒各占一行（强化：不只是「出现过提醒」）
+        assert timeline.count("提醒") == 2, timeline

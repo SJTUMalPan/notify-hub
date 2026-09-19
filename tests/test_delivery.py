@@ -464,8 +464,8 @@ rules:
   poll_interval_seconds: 5
 reminders:
   scan_interval_seconds: 60
-  first_reminder_after_seconds: 1800
-  reminder_interval_seconds: 3600
+  at: "21:00"
+  timezone: "Asia/Shanghai"
 default_channel: secure-wh
 channels:
   - id: secure-wh
