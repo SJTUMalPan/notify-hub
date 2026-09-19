@@ -373,8 +373,10 @@ def _with_token(
 ) -> Optional[dict[str, Any]]
 ```
 
-- `_resolve_token`：解析顺序 `--token` 参数 > 环境变量 `NOTIFY_HUB_TOKEN` > `None`；
-  取值 `strip()` 后为空则视同未提供。**镜像既有 `_resolve_endpoint` 的写法与注释风格。**
+- `_resolve_token`：解析顺序 `--token` 参数 > 环境变量 `NOTIFY_HUB_TOKEN` > `None`。
+  **返回值一律 `strip()`**：去空白后为空 → `None`（视同未提供）；否则返回 strip 之后的值。
+  因此 `--token " T "` 与 `--token T` 完全等价。写法镜像既有 `_resolve_endpoint`，
+  但**它不 strip、这里有意更严**——因为令牌会被拿去和守卫做常量时间比较。
 - `_with_token`：`token is None` → **原样返回入参对象本身**（不复制、不包装）；
   否则返回**新** dict，含原有全部键并加上 `"token": token`。
   **任何情况下都不得就地修改入参 dict。**
@@ -395,7 +397,8 @@ def _with_token(
 - 令牌经**查询参数**传递——守卫只接受 `?token=` 或会话 Cookie，**不读任何请求头**。
   这一点必须照做，**不要发明 `Authorization` 头**。
 - 沿用既有 `_request` / `build_client` 接缝，不新增 HTTP 调用路径。
-- `--token` 的 help 文案要提醒：命令行传参会进 shell 历史，长期使用建议改用环境变量。
+- `--token` 的 help 文案**必须同时出现** `NOTIFY_HUB_TOKEN` 字样与「历史」二字（提醒命令行传参
+  会进 shell 历史、长期使用建议改用环境变量）。测试就按这两个子串断言，不要放宽成「含环境变量」。
 
 #### 4. 验证方法
 
@@ -409,7 +412,8 @@ def _with_token(
 | `_with_token({"status":"all"}, "T")` | 新 dict 同时含 `status` 与 `token`；**入参 dict 未被改动** |
 | `notify send --token T`（MockTransport） | 请求查询串含 `token=T`，请求体与不带令牌时一致 |
 | `notify send`（无令牌） | 请求 URL **不含** `token`（与变更前等价） |
-| `notify todo list --token T` | 查询串同时含 `status` 与 `token` |
+| `notify todo list --all --token T` | 查询串**同时**含 `status=all` 与 `token` |
+| `notify todo list --token T`（不带 `--all`） | 查询串**只含** `token`，不得凭空加 `status` |
 | 环境变量 `NOTIFY_HUB_TOKEN` | 与 `--token` 等效；`--token` 优先 |
 | 401 且未提供令牌 | 退出码 1，stderr 含 `--token` 或 `NOTIFY_HUB_TOKEN` |
 | 401 但已提供令牌 | 退出码 1；不要求提示文案 |

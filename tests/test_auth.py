@@ -1105,3 +1105,49 @@ def test_wrong_token_response_does_not_echo_it_anywhere(ctx) -> None:
             assert all(
                 OTHER_TOKEN not in response.headers.get(name, "") for name in _SECRET_HEADERS
             )
+
+
+# --------------------------------------------------------------------------- #
+# §7.1 末尾（P2 #3）：delta 规格「令牌轮换立即生效」
+# --------------------------------------------------------------------------- #
+def test_token_rotation_invalidates_old_cookie_immediately(ctx) -> None:
+    """令牌由 A 改为 B 并**重建应用**后：基于 A 的旧 Cookie 得 ``401``，基于 B 的新 Cookie 得 ``200``。
+
+    对应 ``specs/access-control/spec.md`` 的「令牌轮换立即生效 / 轮换后旧 Cookie 失效」。
+    「重启」在模块级测试里的可观测等价物是**用新令牌重新装配一个应用实例**——这正是
+    ``create_app`` 在重启时唯一会变的那一步（``add_middleware(AuthGuard, token=...)``）。
+    """
+    auth = _auth()
+    token_a, token_b = TOKEN, OTHER_TOKEN
+
+    old_cookie = {auth.COOKIE_NAME: auth.session_value(token_a)}
+    new_cookie = {auth.COOKIE_NAME: auth.session_value(token_b)}
+    assert old_cookie[auth.COOKIE_NAME] != new_cookie[auth.COOKIE_NAME]
+
+    # 轮换前：基于 A 的 Cookie 正常通过（正控——否则下面的 401 可能只是 Cookie 写错了）。
+    with _client(ctx, token=token_a) as client:
+        before = client.get(
+            "/todos",
+            headers={"Accept": "text/html"},
+            cookies=old_cookie,
+            follow_redirects=False,
+        )
+    assert before.status_code == 200, "轮换前基于 A 的 Cookie 必须可用（正控）"
+
+    # 轮换：令牌改为 B，重建应用。旧 Cookie 立即失效，新 Cookie 立即可用。
+    with _client(ctx, token=token_b) as client:
+        stale = client.get(
+            "/todos",
+            headers={"Accept": "text/html"},
+            cookies=old_cookie,
+            follow_redirects=False,
+        )
+        fresh = client.get(
+            "/todos",
+            headers={"Accept": "text/html"},
+            cookies=new_cookie,
+            follow_redirects=False,
+        )
+
+    assert stale.status_code == 401, "轮换后基于 A 的旧 Cookie 必须立即失效"
+    assert fresh.status_code == 200, "轮换后基于 B 的新 Cookie 必须立即可用"
