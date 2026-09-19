@@ -1,12 +1,19 @@
-"""超时提醒调度：守护线程 + ``threading.Event``（架构 1.1 节，**不是** asyncio）。
+"""每日汇总调度：守护线程 + ``threading.Event``（架构 1.1 节，**不是** asyncio）。
 
-``run_once()`` 的行为与返回值语义（架构 6-M6「M6 语义裁定」）：
+``add-daily-digest`` 把「单项超时间隔提醒」整体替换为「每天固定本地时刻发一条汇总」。
+判定顺序按 ``openspec/changes/add-daily-digest/architecture.md`` 第 3.3 节的冻结伪码：
 
-- 对每个 ``due_for_reminder`` 的待办：重新读取（防并发完成）→ 仍为 pending 才继续 →
-  构造提醒文案 → ``delivery.deliver()`` → ``todos.record_reminder()``。
-- 返回值 = **本轮为该待办发起了一次提醒并完成记账的条数**；**投递成功或失败都计入**
-  （失败也要按间隔重试）。只有「投递调用抛异常被隔离」与「间隙内变已完成被跳过」不计入。
-- 单条待办的异常**不得**中断整轮：捕获、记日志、继续下一条。
+1. 本地时间未到 ``settings.trigger_time`` → 返回 0；
+2. 当日已定案（``delivered`` 或 ``todo_count == 0``）→ 返回 0；
+3. 空待办 → 记 ``todo_count=0, delivered=True`` 定案，返回 0；
+4. 投递汇总（渠道交给 ``DeliveryService`` 的默认渠道与降级链，调度器**不做渠道选择**）；
+5. 成功 → 记 ``delivered=True / fired_at``，逐条待办记账，返回 1；失败 → 记失败原因，返回 0。
+
+硬要求：
+
+- 状态全在 ``digest_runs`` 表，模块内**不得**保存「今天发过了」的内存标记；
+- 单条待办记账失败不得中断整轮；整轮任何异常都必须捕获并记日志，线程不得退出；
+- 单轮最多汇总 1000 条待办（刻意的上限，不是分页）。
 """
 
 from __future__ import annotations
@@ -17,27 +24,33 @@ import threading
 from notify_hub.clock import Clock
 from notify_hub.config import ReminderSettings
 from notify_hub.delivery import DeliveryService
-from notify_hub.domain import DeliveryEvent, TodoStatus
-from notify_hub.services.notifications import notification_for_message
+from notify_hub.domain import TodoStatus
+from notify_hub.services.digest import DigestService
+from notify_hub.services.notifications import notification_for_digest
 from notify_hub.services.todos import TodoService
 
 __all__ = ["ReminderScheduler"]
 
+#: 单轮汇总的待办上限：避免异常情况下构造出超大消息（架构 3.3 节）。
+_MAX_TODOS_PER_ROUND = 1000
+
 
 class ReminderScheduler:
-    """周期性扫描到期待办并发出提醒。"""
+    """周期性检查本地时刻，每天发出至多一条汇总。"""
 
     def __init__(
         self,
         *,
         todos: TodoService,
         delivery: DeliveryService,
+        digest: DigestService,
         clock: Clock,
         settings: ReminderSettings,
         logger: logging.Logger,
     ) -> None:
         self._todos = todos
         self._delivery = delivery
+        self._digest = digest
         self._clock = clock
         self._settings = settings
         self._logger = logger
@@ -82,47 +95,71 @@ class ReminderScheduler:
             try:
                 self.run_once()
             except Exception as exc:  # noqa: BLE001 - 线程不得因异常退出
-                self._logger.warning("提醒扫描轮次异常: %s", exc)
+                self._logger.warning("汇总检查轮次异常: %s", exc)
 
     # ------------------------------------------------------------------ #
     # 单轮
     # ------------------------------------------------------------------ #
     def run_once(self) -> int:
-        """执行一轮；返回实际记账（发送）提醒的待办条数。"""
-        count = 0
-        for candidate in self._todos.due_for_reminder(settings=self._settings):
-            try:
-                todo = self._todos.get(candidate.id)
-                if todo is None or todo.status != TodoStatus.PENDING:
-                    continue
-                message = self._todos.message_for(todo.message_id)
-                if message is None:
-                    self._logger.warning("待办关联的消息不存在: todo_id=%s", todo.id)
-                    continue
+        """执行一轮检查；返回本次**成功投递**的汇总条数（0 或 1）。"""
+        try:
+            return self._run_once()
+        except Exception as exc:  # noqa: BLE001 - 整轮异常隔离
+            self._logger.warning("汇总轮次异常: %s", exc)
+            return 0
 
-                msg = notification_for_message(
-                    message,
-                    kind=DeliveryEvent.REMINDER,
-                    now=self._clock.now(),
-                    todo=todo,
-                )
-                outcome = self._delivery.deliver(
-                    msg,
-                    preferred_channel=todo.preferred_channel,
-                    message_id=todo.message_id,
-                    todo_id=todo.id,
-                )
+    def _run_once(self) -> int:
+        now = self._clock.now()
+        local = now.astimezone(self._settings.zone)
+        if local.time() < self._settings.trigger_time:
+            return 0
+
+        today = local.date()
+        state = self._digest.state_for(today)
+        settled = state is not None and (state.delivered or state.todo_count == 0)
+        if settled:
+            return 0
+
+        todos = self._todos.list(status=TodoStatus.PENDING, limit=_MAX_TODOS_PER_ROUND)
+        if len(todos) >= _MAX_TODOS_PER_ROUND:
+            self._logger.warning(
+                "单轮待办达到上限 %s 条，超出部分本轮不汇总", _MAX_TODOS_PER_ROUND
+            )
+
+        if not todos:
+            self._digest.record(today, todo_count=0, delivered=True)
+            return 0
+
+        message = notification_for_digest(todos, now=now)
+        # 渠道选择交给 DeliveryService 自身的默认渠道与既有降级链。
+        outcome = self._delivery.deliver(
+            message, preferred_channel=None, message_id=None, todo_id=None
+        )
+
+        if not outcome.ok:
+            self._digest.record(
+                today,
+                todo_count=len(todos),
+                delivered=False,
+                error=outcome.error_reason,
+            )
+            return 0
+
+        self._digest.record(
+            today,
+            todo_count=len(todos),
+            delivered=True,
+            fired_at=self._clock.now(),
+        )
+        for todo in todos:
+            try:
                 self._todos.record_reminder(
                     todo.id,
-                    delivered=outcome.ok,
+                    delivered=True,
                     channel_id=outcome.channel_id,
                 )
-                count += 1
-            except Exception as exc:  # noqa: BLE001 - 单条失败不得中断整轮
+            except Exception as exc:  # noqa: BLE001 - 单条记账失败不得中断整轮
                 self._logger.warning(
-                    "提醒待办失败，跳过继续: todo_id=%s: %s",
-                    getattr(candidate, "id", None),
-                    exc,
+                    "汇总记账失败，跳过继续: todo_id=%s: %s", todo.id, exc
                 )
-                continue
-        return count
+        return 1

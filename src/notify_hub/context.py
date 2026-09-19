@@ -25,6 +25,7 @@ from notify_hub.delivery import DeliveryService
 from notify_hub.logging_setup import setup_logging
 from notify_hub.notifiers import NotifierRegistry
 from notify_hub.pipeline import IngestPipeline
+from notify_hub.services.digest import DigestService
 from notify_hub.services.messages import MessageService
 from notify_hub.services.scheduler import ReminderScheduler
 from notify_hub.services.todos import TodoService
@@ -48,6 +49,7 @@ class AppContext:
     delivery: DeliveryService
     messages: MessageService
     todos: TodoService
+    digest: DigestService
     pipeline: IngestPipeline
     scheduler: ReminderScheduler
 
@@ -102,7 +104,10 @@ def _assemble(
     messages = MessageService(db, resolved_clock)
     todos = TodoService(db, resolved_clock, logger=logger)
 
-    # 10. 受理编排（含首次通知的后台工作线程）。
+    # 10. 每日汇总的触发状态（add-daily-digest：提醒模型已由「单项间隔」改为「每日汇总」）。
+    digest = DigestService(db, resolved_clock)
+
+    # 11. 受理编排（含首次通知的后台工作线程）。
     pipeline = IngestPipeline(
         classifier=classifier,
         messages=messages,
@@ -113,10 +118,11 @@ def _assemble(
         run_inline=run_inline,
     )
 
-    # 11. 超时提醒调度。
+    # 12. 每日汇总调度。
     scheduler = ReminderScheduler(
         todos=todos,
         delivery=delivery,
+        digest=digest,
         clock=resolved_clock,
         settings=settings.reminders,
         logger=logger,
@@ -132,6 +138,7 @@ def _assemble(
         delivery=delivery,
         messages=messages,
         todos=todos,
+        digest=digest,
         pipeline=pipeline,
         scheduler=scheduler,
     )

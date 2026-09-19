@@ -1,4 +1,4 @@
-"""待办领域服务：创建/去重、完成、列表、详情与超时判定。
+"""待办领域服务：创建/去重、完成、列表、详情与逐条提醒记账。
 
 接口见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M6」的
 ``services/todos.py`` 段。硬要求：
@@ -8,6 +8,9 @@
 - ``TodoService`` **不得**依赖 ``DeliveryService``（避免环）。
 
 ``list(status=None)`` 表示不过滤状态；缺省参数才是 ``TodoStatus.PENDING``。
+
+``add-daily-digest`` 移除了单项超时提醒的判定入口（连同两个间隔配置键），
+不再有「距上次通知 ≥ 间隔」的门槛；``record_reminder`` 仅负责逐条记账，保留不变。
 """
 
 from __future__ import annotations
@@ -20,7 +23,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from notify_hub.clock import Clock, as_utc
-from notify_hub.config import ReminderSettings
 from notify_hub.db import Database
 from notify_hub.domain import AckReason, TodoEventKind, TodoStatus
 from notify_hub.models import DeliveryRecord, Message, Todo, TodoEvent
@@ -270,31 +272,6 @@ class TodoService:
     # ------------------------------------------------------------------ #
     # 提醒
     # ------------------------------------------------------------------ #
-    def due_for_reminder(self, *, settings: ReminderSettings) -> list[Todo]:
-        """返回当前到期待提醒的 pending 待办。
-
-        ``reminder_count == 0`` 时门槛为 ``first_reminder_after_seconds``（自
-        ``first_notified_at`` 起），否则为 ``reminder_interval_seconds``（自
-        ``last_notified_at`` 起）。
-        """
-        now = self._clock.now()
-        statement = select(Todo).where(Todo.status == TodoStatus.PENDING.value)
-        with self._db.session() as session:
-            rows = list(session.exec(statement).all())
-
-        due: list[Todo] = []
-        for todo in rows:
-            if todo.reminder_count == 0:
-                base = as_utc(todo.first_notified_at)
-                threshold = settings.first_reminder_after_seconds
-            else:
-                base = as_utc(todo.last_notified_at)
-                threshold = settings.reminder_interval_seconds
-            if (now - base).total_seconds() >= threshold:
-                due.append(todo)
-        due.sort(key=lambda todo: (as_utc(todo.first_notified_at), todo.id))
-        return due
-
     def record_reminder(
         self,
         todo_id: int,

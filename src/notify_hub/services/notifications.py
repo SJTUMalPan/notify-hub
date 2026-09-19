@@ -1,12 +1,15 @@
 """通知文案构造与时长格式化。
 
-冻结文案见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M6」：
+冻结文案见 ``openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md`` 第 6 节「模块 M6」
+与 ``openspec/changes/add-daily-digest/architecture.md`` 第 3.3 节：
 
 - **首次通知**：``overdue_seconds=None``、``todo_id=None``、``title`` 不加前缀；
   正文依次含来源、分类、时间、空行、原始正文。
-- **提醒**：``overdue_seconds = now - first_notified_at``；标题形如
-  ``[待办超时 <时长>] <标题>``；正文依次含来源、分类、已超时、待办 id、空行、原始正文；
-  ``meta`` 含 ``todo_id`` / ``message_id`` / ``reminder_count``。
+- **每日汇总**（``add-daily-digest``）：输入是**未完成待办列表**（不是单条消息），
+  ``title = "[待办汇总] <N> 项未完成"``，正文逐条列出标题与已超时时长。
+
+单项超时提醒已随 ``add-daily-digest`` 整体移除：``notification_for_message`` 不再有
+``kind=REMINDER`` 分支（已无调用方），汇总文案由 :func:`notification_for_digest` 负责。
 
 时间列一律先经 :func:`notify_hub.clock.as_utc` 归一化（架构 1.2 节硬要求）。
 """
@@ -14,13 +17,17 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import TYPE_CHECKING, Sequence
 
 from notify_hub.clock import as_utc
 from notify_hub.domain import DeliveryEvent, Level
 from notify_hub.models import Message, Todo
 from notify_hub.notifiers.base import NotificationMessage
 
-__all__ = ["format_duration", "notification_for_message"]
+if TYPE_CHECKING:  # 仅类型标注；避免运行时与 todos 模块形成导入环
+    from notify_hub.services.todos import TodoView
+
+__all__ = ["format_duration", "notification_for_message", "notification_for_digest"]
 
 _SECONDS_PER_MINUTE = 60
 _SECONDS_PER_HOUR = 3600
@@ -67,43 +74,15 @@ def notification_for_message(
     now: datetime,
     todo: Todo | None = None,
 ) -> NotificationMessage:
-    """把一条消息（可带待办）转成与渠道无关的 :class:`NotificationMessage`。"""
+    """把一条消息转成与渠道无关的 :class:`NotificationMessage`。
+
+    ``todo`` / ``now`` 保留在冻结签名中；单项超时提醒已移除，故 ``todo`` 不再改变文案。
+    """
     level = _level_of(message)
     source = message.source
     category = message.category or ""
     body_text = message.body or ""
     occurred_at = as_utc(message.occurred_at)
-
-    if kind is DeliveryEvent.REMINDER and todo is not None:
-        overdue_seconds = (now - as_utc(todo.first_notified_at)).total_seconds()
-        duration = format_duration(overdue_seconds)
-        title = f"[待办超时 {duration}] {todo.title}"
-        body = "\n".join(
-            [
-                f"来源: {source}",
-                f"分类: {category}",
-                f"已超时: {duration}",
-                f"待办 id: {todo.id}",
-                "",
-                body_text,
-            ]
-        )
-        return NotificationMessage(
-            title=title,
-            body=body,
-            level=level,
-            source=source,
-            occurred_at=occurred_at,
-            kind=kind,
-            todo_id=todo.id,
-            overdue_seconds=overdue_seconds,
-            category=message.category,
-            meta={
-                "todo_id": todo.id,
-                "message_id": todo.message_id,
-                "reminder_count": todo.reminder_count,
-            },
-        )
 
     body = "\n".join(
         [
@@ -124,5 +103,39 @@ def notification_for_message(
         todo_id=None,
         overdue_seconds=None,
         category=message.category,
+        meta={},
+    )
+
+
+def notification_for_digest(
+    todos: Sequence[TodoView], *, now: datetime
+) -> NotificationMessage:
+    """把未完成待办渲染成一条每日汇总通知（冻结文案见架构 3.3 节）。
+
+    前置：``todos`` 非空（为空时调用方不应调用本函数）。
+    排序：调用方保证已按 ``overdue_seconds`` 降序；本函数**不重排**。
+    ``title`` 是独立的一段，正文**不**重复表头（正文渲染归属不变量）。
+    """
+    lines: list[str] = []
+    for index, todo in enumerate(todos, start=1):
+        clauses = [
+            f"已超时 {format_duration(todo.overdue_seconds)}",
+            f"来源 {todo.source}",
+        ]
+        if todo.category:
+            clauses.append(f"分类 {todo.category}")
+        lines.append(f"{index}. {todo.title}（{'；'.join(clauses)}）")
+
+    body = "\n".join([*lines, "", "请到待办页面处理。"])
+    return NotificationMessage(
+        title=f"[待办汇总] {len(todos)} 项未完成",
+        body=body,
+        level=Level.WARNING,
+        source="notify-hub",
+        occurred_at=as_utc(now),
+        kind=DeliveryEvent.REMINDER,
+        todo_id=None,
+        overdue_seconds=None,
+        category=None,
         meta={},
     )
