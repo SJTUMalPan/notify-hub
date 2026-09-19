@@ -166,11 +166,9 @@ def test_resolve_token_blank_values_count_as_absent(cli, monkeypatch) -> None:
     assert cli._resolve_token("   ") == ENV_TOKEN
     assert cli._resolve_token("") == ENV_TOKEN
 
-    # 非空白但带首尾空白的取值：**视为已提供**（两种 strip 语义下都成立）。
-    # 返回值本身是否被 strip 规格未规定，见文件末尾注释与报告中的 SPEC-GAPS。
+    # 非空白但带首尾空白的取值：**视为已提供**，且 §7.1 第 2 段规定返回值一律 strip()。
     padded = cli._resolve_token(f"  {TOKEN}  ")
-    assert padded is not None
-    assert padded.strip() == TOKEN
+    assert padded == TOKEN
 
 
 # --------------------------------------------------------------------------- #
@@ -435,15 +433,13 @@ def test_token_help_mentions_shell_history_and_env_var(cli, monkeypatch) -> None
         text = result.stdout
         assert "--token" in text, f"{argv} 的 help 未列出 --token：{text!r}"
         assert "历史" in text, f"{argv} 的 help 未提醒命令行传参会进 shell 历史：{text!r}"
-        assert "NOTIFY_HUB_TOKEN" in text or "环境变量" in text, (
-            f"{argv} 的 help 未建议改用环境变量：{text!r}"
+        assert "NOTIFY_HUB_TOKEN" in text, (
+            f"{argv} 的 help 未出现环境变量名 NOTIFY_HUB_TOKEN：{text!r}"
         )
 
 
 # --------------------------------------------------------------------------- #
 # 说明（不在断言内）：
-# §7.1 第 2 段只规定「取值 ``strip()`` 后为空则视同未提供」，**未**规定返回值是否已 strip。
-# 既有 ``_resolve_endpoint`` 不 strip，故 ``_resolve_token(" T ")`` 的返回值在规格上不确定；
-# 上面的用例只断言两种语义下都成立的近似（``is not None`` 且 ``.strip() == "T"``）。
-# 该歧义已写入报告 SPEC-GAPS。
+# §7.1 第 2 段规定「取值 ``strip()`` 后为空则视同未提供」，并**明确规定返回值一律 strip()**：
+# ``_resolve_token(" T ")`` 必须返回 ``"T"``，与 ``_resolve_token("T")`` 完全等价。
 # --------------------------------------------------------------------------- #
