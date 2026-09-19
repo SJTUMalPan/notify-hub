@@ -20,6 +20,11 @@ DEFAULT_ENDPOINT = "http://127.0.0.1:8000"
 MESSAGES_PATH = "/api/v1/messages"
 TODOS_PATH = "/api/v1/todos"
 
+#: ``--token`` 的 help 文案（冻结：必须同时出现 ``NOTIFY_HUB_TOKEN`` 与「历史」字样）。
+TOKEN_HELP = (
+    "访问令牌（命令行传参会留在 shell 历史中，长期使用建议改用环境变量 NOTIFY_HUB_TOKEN）"
+)
+
 
 class CliError(Exception):
     """带冻结退出码的客户端错误。``main()`` 负责渲染到 stderr 并退出。"""
@@ -64,6 +69,37 @@ def _emit_error(message: str) -> None:
 def _resolve_endpoint(endpoint: Optional[str]) -> str:
     """解析顺序：命令行参数 > 环境变量 > 默认回环地址。"""
     return endpoint or os.environ.get("NOTIFY_HUB_ENDPOINT") or DEFAULT_ENDPOINT
+
+
+def _resolve_token(token: Optional[str]) -> Optional[str]:
+    """解析顺序：``--token`` 参数 > 环境变量 ``NOTIFY_HUB_TOKEN`` > ``None``。
+
+    取值一律 ``strip()``：去空白后为空视同**未提供**（继续沿解析顺序回落）；
+    否则返回 strip 之后的值。令牌会被拿去与守卫做常量时间比较，因此这里比
+    ``_resolve_endpoint`` 更严，不保留首尾空白。
+    """
+    for candidate in (token, os.environ.get("NOTIFY_HUB_TOKEN")):
+        if candidate is None:
+            continue
+        stripped = candidate.strip()
+        if stripped:
+            return stripped
+    return None
+
+
+def _with_token(
+    params: Optional[dict[str, Any]], token: Optional[str]
+) -> Optional[dict[str, Any]]:
+    """把令牌并入查询参数。
+
+    ``token is None`` → 原样返回入参对象本身（不复制、不包装）；
+    否则返回**新** dict，含原有全部键并加上 ``"token"``。任何情况下都不就地修改入参。
+    """
+    if token is None:
+        return params
+    merged = dict(params) if params is not None else {}
+    merged["token"] = token
+    return merged
 
 
 def _describe_rejection(resp: httpx.Response) -> str:
@@ -112,8 +148,20 @@ def _describe_rejection(resp: httpx.Response) -> str:
     return f"{head}: {reason}" if reason else head
 
 
-def _request(client: httpx.Client, method: str, url: str, **kwargs: Any) -> httpx.Response:
-    """发请求并统一映射网络/HTTP 失败到冻结退出码。"""
+def _request(
+    client: httpx.Client,
+    method: str,
+    url: str,
+    *,
+    token_missing: bool = False,
+    **kwargs: Any,
+) -> httpx.Response:
+    """发请求并统一映射网络/HTTP 失败到冻结退出码。
+
+    ``token_missing`` 仅在「本次未提供令牌」时置真：此时若服务端返回 401，
+    在既有原因之外追加一行 ``--token`` / ``NOTIFY_HUB_TOKEN`` 提示（窄口径）。
+    未提供令牌且非 401 时错误信息与变更前逐字一致。
+    """
     try:
         resp = client.request(method, url, **kwargs)
     except (httpx.ConnectError, httpx.TimeoutException) as exc:
@@ -121,7 +169,13 @@ def _request(client: httpx.Client, method: str, url: str, **kwargs: Any) -> http
     except httpx.TransportError as exc:
         raise CliError(3, f"无法连接服务端: {exc}") from exc
     if resp.status_code >= 400:
-        raise CliError(1, _describe_rejection(resp))
+        message = _describe_rejection(resp)
+        if resp.status_code == 401 and token_missing:
+            message = (
+                f"{message}（本次未提供访问令牌，可用 --token 或环境变量 "
+                "NOTIFY_HUB_TOKEN 指定）"
+            )
+        raise CliError(1, message)
     return resp
 
 
@@ -161,6 +215,7 @@ def _root(
     need_ack: bool = typer.Option(False, "--need-ack", help="是否需要确认"),
     dedup_key: Optional[str] = typer.Option(None, "--dedup-key", help="去重键"),
     endpoint: Optional[str] = typer.Option(None, "--endpoint", help="服务端地址"),
+    token: Optional[str] = typer.Option(None, "--token", help=TOKEN_HELP),
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
@@ -191,8 +246,17 @@ def _root(
         payload["dedup_key"] = dedup_key
 
     client = build_client(_resolve_endpoint(endpoint))
+    resolved_token = _resolve_token(token)
+    params = _with_token(None, resolved_token)
     try:
-        resp = _request(client, "POST", MESSAGES_PATH, json=payload)
+        resp = _request(
+            client,
+            "POST",
+            MESSAGES_PATH,
+            token_missing=resolved_token is None,
+            params=params,
+            json=payload,
+        )
     finally:
         client.close()
 
@@ -209,12 +273,20 @@ def _root(
 def todo_list(
     all_: bool = typer.Option(False, "--all", help="包含已完成待办"),
     endpoint: Optional[str] = typer.Option(None, "--endpoint", help="服务端地址"),
+    token: Optional[str] = typer.Option(None, "--token", help=TOKEN_HELP),
 ) -> None:
-    params = {"status": "all"} if all_ else None
+    resolved_token = _resolve_token(token)
+    params = _with_token({"status": "all"} if all_ else None, resolved_token)
 
     client = build_client(_resolve_endpoint(endpoint))
     try:
-        resp = _request(client, "GET", TODOS_PATH, params=params)
+        resp = _request(
+            client,
+            "GET",
+            TODOS_PATH,
+            token_missing=resolved_token is None,
+            params=params,
+        )
     finally:
         client.close()
 
@@ -247,10 +319,18 @@ def todo_list(
 def todo_done(
     todo_id: int = typer.Argument(..., help="待办 ID"),
     endpoint: Optional[str] = typer.Option(None, "--endpoint", help="服务端地址"),
+    token: Optional[str] = typer.Option(None, "--token", help=TOKEN_HELP),
 ) -> None:
+    resolved_token = _resolve_token(token)
     client = build_client(_resolve_endpoint(endpoint))
     try:
-        resp = _request(client, "POST", f"{TODOS_PATH}/{todo_id}/done")
+        resp = _request(
+            client,
+            "POST",
+            f"{TODOS_PATH}/{todo_id}/done",
+            token_missing=resolved_token is None,
+            params=_with_token(None, resolved_token),
+        )
     finally:
         client.close()
 
