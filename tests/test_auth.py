@@ -87,6 +87,20 @@ class _SentinelApp:
         await send({"type": "http.response.body", "body": self._body})
 
 
+class _RecordingApp:
+    """合规的内层 ASGI 应用：只记录 ``(scope, receive, send)`` 三者身份，从不发送消息。
+
+    用于观测非 http scope 的「原样透传」：``lifespan`` / ``websocket`` 应用本就不该发
+    ``http.response.*``，所以守卫**自己不包装 ``send``** 时，外层不会看到任何消息。
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    async def __call__(self, scope, receive, send) -> None:  # noqa: ANN001
+        self.calls.append((scope, receive, send))
+
+
 def _scope(
     path: str = "/todos",
     *,
@@ -362,13 +376,36 @@ def test_guard_comparison_is_bytes_safe_for_non_ascii() -> None:
 def test_non_http_scope_is_passed_through() -> None:
     auth = _auth()
 
-    inner = _SentinelApp()
+    inner = _RecordingApp()
     guard = auth.AuthGuard(app=inner, token=TOKEN)
 
+    passed: dict[str, tuple] = {}
     for type_ in ("lifespan", "websocket"):
-        sent = _run(guard, _scope(path="/", type_=type_))
+        scope = _scope(path="/", type_=type_)
+        sent: list[dict] = []
+
+        async def receive() -> dict:
+            return {"type": f"{type_}.receive"}
+
+        async def send(message: dict) -> None:
+            sent.append(message)
+
+        async def drive() -> None:
+            await guard(scope, receive, send)
+
+        asyncio.run(drive())
+        passed[type_] = (scope, receive, send)
+
+        # 合规的内层应用什么都不发 → 守卫若原样透传，守卫自身也就没有发出任何消息。
         assert sent == [], f"{type_} 不得产生 HTTP 响应（应直接透传）"
+
     assert len(inner.calls) == 2, "websocket/lifespan 必须透传到内层应用"
+    for type_, (got_scope, got_receive, got_send) in zip(("lifespan", "websocket"), inner.calls):
+        scope, receive, send = passed[type_]
+        # 「原样透传」的最强可观测编码：三件套必须是同一对象，send 不得被包装。
+        assert got_scope is scope, f"{type_}: scope 未被原样透传"
+        assert got_receive is receive, f"{type_}: receive 未被原样透传"
+        assert got_send is send, f"{type_}: send 被包装或未被原样透传"
 
 
 def test_disabled_guard_passes_through_and_does_not_parse() -> None:
