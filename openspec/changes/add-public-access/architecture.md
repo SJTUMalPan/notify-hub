@@ -20,7 +20,8 @@
 
 | 文件 | 处置 | 内容 |
 |---|---|---|
-| `src/notify_hub/config.py` | 架构师，阶段 0 | `Settings` 增 `auth_token: str | None = None`；`load_settings` 解析 `server.auth_token`（缺省 `None`；非字符串或空白串报 `ConfigurationError`）；`credential_values` 把非空令牌并入返回值 |
+| `src/notify_hub/config.py` | 架构师，阶段 0 | `Settings` 增 `auth_token: str | None = None`；`credential_values` 把非空令牌并入返回值（字面量级脱敏） |
+| `src/notify_hub/config.py` 的 `_parse_auth_token` | 架构师，阶段 0 | `server.auth_token` 的**冻结语义**：键缺失或值为 YAML `null` → `None`（不启用鉴权）；值必须是字符串，`strip()` 后仍非空，否则抛 `ConfigurationError`（非字符串与纯空白/空串都算）；返回值是 **`strip()` 之后**的字符串。测试作者按此写断言，不要自行推断是否 strip |
 | `src/notify_hub/main.py` | 架构师，阶段 0 | 抽出纯函数 `build_uvicorn_kwargs(settings) -> dict`，返回 `{"host","port","log_config": None}`；`main()` 用它调 `uvicorn.run` |
 | `src/notify_hub/app.py` | 架构师，**阶段 B 末尾**（此时 M-A 已存在） | `create_app` 装载 `AuthGuard` 中间件 |
 | `tests/conftest.py` | **不改** | 造带令牌的 `Settings` 用 `dataclasses.replace(tmp_settings, auth_token="...")` 即可（`Settings` 是 frozen dataclass） |
@@ -79,8 +80,14 @@ def strip_token_param(query_string: str) -> str
 ```python
 @dataclass(frozen=True)
 class AuthGuard:
+    app: Any = None
     token: str | None = None
 ```
+- **字段顺序固定为 `app` 在前**：Starlette 的 `add_middleware(cls, **opts)` 会以
+  `cls(app=<被包裹应用>, **opts)` 构造，因此 `app.add_middleware(AuthGuard, token=T)`
+  能直接工作。不要改动字段顺序，也不要在 `__init__` 里额外要求别的参数。
+- `app is None` 仅供纯单元测试使用（只调 `is_authorized` / `expected_cookie`）；
+  此时一旦需要透传，**必须抛 `RuntimeError`**，不得静默放行。
 - `token` 为 `None` 或去空白后为空 → **守卫关闭**。
 - 属性 `enabled -> bool`：`token` 非空即 `True`。
 - 不变量：`AuthGuard` 一经构造即不可变；不持有任何全局状态。
@@ -93,7 +100,8 @@ class AuthGuard:
   - **比较前双方都 `.encode("utf-8")` 成 bytes**（`hmac.compare_digest` 对非 ASCII 的 `str` 会抛 `TypeError`）。
 - **ASGI 接口** `async def __call__(self, scope, receive, send) -> None`：
   作为纯 ASGI 中间件使用（**不要继承 `BaseHTTPMiddleware`**——它会缓冲响应并干扰
-  `BackgroundTasks`/流式响应，本应用有后台线程投递语义）。
+  `BackgroundTasks`/流式响应，本应用有后台线程投递语义）。透传分支一律
+  `await self.app(scope, receive, send)`。
 
 `AuthGuard.__call__` 的判定顺序，**必须严格按此顺序，每步都可被单独观测**：
 
@@ -148,8 +156,44 @@ class AuthGuard:
 | 错误 Cookie / 错误令牌 | 均为 `False`（两种错法各一条用例） |
 | 两者都错 | `False` |
 
-**模块级测试**（把 `AuthGuard` 装在**真实应用**前面，用 `create_app(ctx=build_test_context(settings))`
-与 `fastapi.testclient.TestClient`；`settings` 由 `dataclasses.replace(tmp_settings, auth_token=T)` 造出）：
+**单元测试（阶段 0 共享文件组）**——这一组覆盖架构师在阶段 0 改的 `config.py` / `main.py`，
+语义以 §2 的两行表格为准：
+
+| 验收点 | 可观察结果 |
+|---|---|
+| `server.auth_token` 键缺失 | `settings.auth_token is None` |
+| `server.auth_token` 显式 `null` | `settings.auth_token is None` |
+| 非字符串（如 `12345`） | `load_settings` 抛 `ConfigurationError` |
+| 纯空白串 / 空串 | `load_settings` 抛 `ConfigurationError` |
+| 值含首尾空白（如 `"  T  "`） | 返回 `"T"`（已 strip） |
+| `credential_values` | 非空令牌的字面量出现在返回值里 |
+| `build_uvicorn_kwargs` | `log_config is None`，且 `host == "127.0.0.1"` |
+
+**这一组若失败，是架构师实现的问题**：不要改期望值去迁就代码，写进 `SPEC-GAPS`/`NOTES` 报告。
+
+**模块级测试**（把 `AuthGuard` 装在**真实路由**前面，用 `fastapi.testclient.TestClient`）。
+
+**装配方式（冻结，照抄，不要自己发明）**：**不要**用 `create_app`——它要到阶段 B 末尾
+才装载本中间件，阶段 A 用它根本测不到守卫。自己拼一个只含真实路由的应用：
+
+```python
+from fastapi import FastAPI
+from notify_hub.api import create_api_router
+from notify_hub.web import create_web_router
+
+def guarded_app(ctx, token):
+    app = FastAPI()
+    app.state.ctx = ctx                     # web 路由经 request.app.state.ctx 取上下文
+    app.include_router(create_api_router(ctx))
+    app.include_router(create_web_router(ctx))
+    app.add_middleware(AuthGuard, token=token)
+    return app
+```
+
+该应用**没有 lifespan**，不启动任何后台线程。`ctx` 直接用 conftest 的 `ctx` /
+`make_context` 夹具；守卫令牌由 `add_middleware(token=...)` 传入，**与
+`ctx.settings.auth_token` 无关**，两者不要混用。生产装配在 `create_app` 里的装载
+由**阶段 D 的集成测试**验证（见 §4），不在本模块的测试范围内。
 
 | 验收点 | 可观察结果 |
 |---|---|
