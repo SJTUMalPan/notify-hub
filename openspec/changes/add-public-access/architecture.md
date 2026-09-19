@@ -196,6 +196,14 @@ class AuthGuard:
 
 **这一组若失败，是架构师实现的问题**：不要改期望值去迁就代码，写进 `SPEC-GAPS`/`NOTES` 报告。
 
+**两条已接受的观测极限**（不是缺陷，审查时不要据此开单）：
+
+- 「不写日志」的静态检查只覆盖 `import logging`（含子模块与 `as` 别名、`from logging import …`）
+  与 `logging.*` 属性调用两类**字面形式**。`importlib.import_module("logging")` 这类动态取用
+  不在契约内。
+- 「strip 必须在构造期完成、不得推迟到请求期」在行为上不可直接观测（惰性归一化在首次请求后
+  表现相同）。验收表用的是可观测近似：**构造后零请求读字段**即为归一化值。
+
 **模块级测试**（把 `AuthGuard` 装在**真实路由**前面，用 `fastapi.testclient.TestClient`）。
 
 **装配方式（冻结，照抄，不要自己发明）**：**不要**用 `create_app`——它要到阶段 B 末尾
