@@ -767,11 +767,24 @@ def test_deployment_doc_states_loopback_and_systemd_boundary() -> None:
     assert "[Unit]" in text and "[Service]" in text, (
         f"{DEPLOYMENT_DOC_PATH} 必须包含可复制的 systemd 单元示例（[Unit] 与 [Service] 段）"
     )
-    assert ("不要暴露到公网" in text) or ("不要暴露到公网" in text.replace(" ", "")), (
-        f"{DEPLOYMENT_DOC_PATH} 必须含「不要暴露到公网」的显式警示句"
+    # add-public-access 之后本文件的边界契约被**有意取代**：服务现在内置访问令牌认证
+    # （server.auth_token），公网暴露是被支持且有文档的部署方式，因此不再写
+    # 「不要暴露到公网」——那句话在本次变更后已不成立。契约随之改为断言**新的**真话：
+    # 暴露前必须配置令牌，且应用自身不得改绑 0.0.0.0。
+    # 裁定记录见 openspec/changes/add-public-access/architecture.md §6 的 R4。
+    assert "auth_token" in text, (
+        f"{DEPLOYMENT_DOC_PATH} 必须写明访问令牌的配置键 server.auth_token"
+    )
+    assert ("必须先配令牌" in text) or ("先配令牌" in text), (
+        f"{DEPLOYMENT_DOC_PATH} 必须含「暴露之前必须先配令牌」的显式警示"
+        f"（未配置令牌时鉴权整体关闭）"
+    )
+    assert "0.0.0.0" in text, (
+        f"{DEPLOYMENT_DOC_PATH} 必须点名「不要改成 0.0.0.0」这个反面，"
+        f"把「应用自身只绑回环」的边界写死"
     )
     assert ("反向代理" in text) and ("鉴权" in text), (
-        f"{DEPLOYMENT_DOC_PATH} 必须说明跨机器使用需自加反向代理与鉴权"
+        f"{DEPLOYMENT_DOC_PATH} 必须说明跨机器使用需自加反向代理与鉴权（本版本不内置 TLS）"
     )
 
     exec_lines = [line.strip() for line in text.splitlines() if "ExecStart" in line]
