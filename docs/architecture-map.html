@@ -142,7 +142,7 @@
         <tbody>
           <tr><td class="p">notify-hub-rule-reloader</td><td class="p">classifier/__init__.py</td><td class="d">轮询规则文件 mtime，变更即热加载；坏配置保留上一份可用规则集</td></tr>
           <tr><td class="p">notify-hub-ingest-worker</td><td class="p">pipeline.py</td><td class="d">从 <code>queue.Queue</code> 取 message_id，做首次通知投递</td></tr>
-          <tr><td class="p">notify-hub-reminder-scheduler</td><td class="p">services/scheduler.py</td><td class="d">周期扫描待完成待办，到点发超时提醒</td></tr>
+          <tr><td class="p">notify-hub-reminder-scheduler</td><td class="p">services/scheduler.py</td><td class="d">周期扫描本地时刻，每天到点发一条汇总</td></tr>
         </tbody>
       </table>
       <div class="note">除 FastAPI 路由外，全部是<b>同步代码</b>：<code>Notifier.send()</code> 是同步的，
@@ -151,7 +151,7 @@
       ——后者在 TestClient 下会阻塞响应，导致「慢渠道不影响响应」无法被测试固定。</div>
     </div>
     <div class="card">
-      <h2>四张表</h2>
+      <h2>五张表</h2>
       <table>
         <thead><tr><th>表</th><th>一行代表什么</th></tr></thead>
         <tbody>
@@ -159,6 +159,7 @@
           <tr><td class="p">todos</td><td class="d">一条待办（状态、首次/上次通知时间、提醒次数、完成时间）。<code>(source, dedup_key)</code> 上有部分唯一索引，仅约束「待完成」且跳过 NULL</td></tr>
           <tr><td class="p">deliveries</td><td class="d"><b>每一次投递尝试</b>（渠道、时间、成功与否、失败原因、是否首选/是否降级）</td></tr>
           <tr><td class="p">todo_events</td><td class="d">待办的时间序列（创建 / 每次提醒 / 完成），详情页靠它回溯</td></tr>
+          <tr><td class="p">digest_runs</td><td class="d">某个<b>本地自然日</b>的汇总状态（是否已定案/已送达、覆盖待办数、尝试次数、失败原因）。<code>local_date</code> 唯一索引，保证当天只发一条且重启不重复</td></tr>
         </tbody>
       </table>
     </div>
@@ -180,7 +181,7 @@ const LAYERS = [
   {id:"L3", title:"L3 · 编排层", mods:[
     {id:"pipeline", label:"M7 pipeline.py", files:"IngestPipeline：分类→落库→待办→后台派发"}]},
   {id:"L2", title:"L2 · 领域层", mods:[
-    {id:"services", label:"M6 services/*", files:"messages.py · todos.py · notifications.py · scheduler.py"},
+    {id:"services", label:"M6 services/*", files:"messages.py · todos.py · notifications.py · digest.py · scheduler.py"},
     {id:"delivery", label:"M4 delivery.py", files:"渠道选择与降级"},
     {id:"notifiers", label:"M4 notifiers/*", files:"base.py（契约）· registry.py · webhook.py · email.py · feishu.py"},
     {id:"classifier", label:"M3 classifier/*", files:"rules.py · engine.py · loader.py"}]},
@@ -237,7 +238,7 @@ S(6,"派发","入队后立即返回 202","L3",
 S(7,"构造通知","把消息行渲染成与渠道无关的通知","L2",
   "产出渠道无关的 <code>NotificationMessage</code>。注意 <b>body 已经是成品正文</b>——里面含「来源 / 分类 / 时间 + 空行 + 原文」，适配器只负责标题，不得再拼一遍表头。",
   [["pipeline.py","IngestPipeline.dispatch()","后台线程入口：读消息 → 构造 → 投递"],
-   ["services/notifications.py","notification_for_message()","渲染文案；提醒类内含「已超时」与「待办 id」"],
+   ["services/notifications.py","notification_for_message()","首次通知文案（正文即成品）；汇总文案另见 notification_for_digest()"],
    ["notifiers/base.py","NotificationMessage","统一消息结构（标题/正文/级别/来源/时间/超时）"]],
   "NotificationMessage",null,true),
 S(8,"选渠道并投递","首选 → 默认 → 其余，逐次记档","L2",
@@ -247,19 +248,19 @@ S(8,"选渠道并投递","首选 → 默认 → 其余，逐次记档","L2",
    ["notifiers/feishu.py","FeishuNotifier.send()","加签 + 嵌套载荷；业务错误码非 0 也算失败"],
    ["models.py","DeliveryRecord","每一次尝试一行"]],
   "DeliveryOutcome + deliveries 行",null,true),
-S(9,"超时提醒","没点完成就一直提醒","L2",
-  "独立线程周期扫描：<b>尚未提醒过</b>用首次门槛（默认 8 小时，自 first_notified_at 起），<b>已提醒过</b>用间隔（默认 8 小时，自 last_notified_at 起）。<br><code>last_notified_at</code> <b>无条件更新</b>（与投递成败无关），这样「节奏稳定」与「失败后下个周期再试」能同时成立。",
-  [["services/scheduler.py","ReminderScheduler.run_once()","一轮扫描；单条出错不中断整轮"],
-   ["services/todos.py","TodoService.due_for_reminder()","超时判定"],
-   ["services/todos.py","TodoService.record_reminder()","更新 last_notified_at / reminder_count + 写事件"],
-   ["services/notifications.py","notification_for_message(kind=REMINDER)","标题前缀与「已超时」行"]],
-  "新的 deliveries + todo_events(reminder) 行",null,true),
+S(9,"每日汇总","每天固定本地时间一条，覆盖全部未完成","L2",
+  "独立线程周期扫描本地时刻：<code>timezone</code> 下越过 <code>at</code>（默认 21:00 Asia/Shanghai）后，<b>第一轮检查就定案</b>——当时没有未完成待办则不发、当天也不再发。<br>当天投递失败会在<b>同一自然日内</b>按 <code>scan_interval_seconds</code> 重试，<b>跨天不补发</b>；「今天发没发/检查没检查」持久化在 <code>digest_runs</code>，重启不重复也不吞掉。",
+  [["services/scheduler.py","ReminderScheduler.run_once()","一轮检查：本地时刻判定 → 汇总 → 逐条记账；单条出错不中断整轮"],
+   ["services/digest.py","DigestService.state_for() / record()","按本地日期读写当日定案状态（唯一索引，重启安全）"],
+   ["services/notifications.py","notification_for_digest(todos, now=…)","渲染「[待办汇总] N 项未完成」+ 逐条「已超时」明细，按超时时长降序"],
+   ["services/todos.py","TodoService.record_reminder()","每条被覆盖的待办更新 last_notified_at / reminder_count + 写事件"]],
+  "一条 deliveries(message_id=todo_id=None) + 每条待办一条 todo_events(reminder)",null,true),
 S(10,"完成","从此刻起不再提醒",["L4","L2"],
   "两个入口共用同一套 service 方法，不存在两份业务逻辑：<b>Web 页面表单</b>与 <b>CLI <code>notify todo done</code></b>（后者走 HTTP）。<br>完成是<b>幂等</b>的：重复完成不改变原完成时间；已完成不会再回到待完成。",
   [["web/routes.py","POST /todos/{id}/done","页面表单 → 303 重定向回列表"],
    ["api/todos.py","complete_todo()","HTTP 接口（CLI 用它）"],
    ["services/todos.py","TodoService.complete()","记 completed_at + 写 todo_events(completed)"]],
-  "Todo 状态 done；此后 due_for_reminder 永不返回它")
+  "Todo 状态 done；此后不再进入每日汇总的未完成列表")
 ];
 
 /* ------------------------------------------------------------------ 渲染 */
@@ -339,7 +340,7 @@ const MAP=[
  ["L1 基础层","src/notify_hub/redact.py","脱敏工具链：redact_text / redact_url / extract_url_secrets（含 query 与路径提取）"],
  ["L1 基础层","src/notify_hub/logging_setup.py","日志初始化，把 SecretFilter 装到各 handler 上"],
  ["L1 基础层","src/notify_hub/db.py","引擎、会话上下文（expire_on_commit=False）、幂等建表"],
- ["L1 基础层","src/notify_hub/models.py","四张表 ORM：messages / todos / deliveries / todo_events"],
+ ["L1 基础层","src/notify_hub/models.py","五张表 ORM：messages / todos / deliveries / todo_events / digest_runs"],
 
  ["L2 领域层 · 分类","src/notify_hub/classifier/rules.py","规则 schema 与 YAML 解析"],
  ["L2 领域层 · 分类","src/notify_hub/classifier/engine.py","匹配引擎（首个命中生效）"],
@@ -352,9 +353,10 @@ const MAP=[
  ["L2 领域层 · 投递","src/notify_hub/notifiers/feishu.py","飞书专属适配器：嵌套载荷 + 加签 sign_feishu()"],
  ["L2 领域层 · 投递","src/notify_hub/delivery.py","渠道选择与降级；每次尝试写投递记录"],
  ["L2 领域层 · 服务","src/notify_hub/services/messages.py","消息读写（create / get / list / deliveries）"],
- ["L2 领域层 · 服务","src/notify_hub/services/todos.py","待办生成去重、完成、列表详情、超时判定"],
- ["L2 领域层 · 服务","src/notify_hub/services/notifications.py","notification_for_message 渲染；format_duration"],
- ["L2 领域层 · 服务","src/notify_hub/services/scheduler.py","ReminderScheduler：守护线程周期扫描发提醒"],
+ ["L2 领域层 · 服务","src/notify_hub/services/todos.py","待办生成去重、完成、列表详情、逐条提醒记账"],
+ ["L2 领域层 · 服务","src/notify_hub/services/notifications.py","notification_for_message / notification_for_digest 渲染；format_duration"],
+ ["L2 领域层 · 服务","src/notify_hub/services/digest.py","DigestService：按本地日期持久化每日汇总的定案/送达/失败状态"],
+ ["L2 领域层 · 服务","src/notify_hub/services/scheduler.py","ReminderScheduler：守护线程周期扫描本地时刻，每天发一条汇总"],
 
  ["L3 编排层","src/notify_hub/pipeline.py","IngestPipeline：分类→落库→待办→队列/派发；工作线程生命周期"],
 
@@ -416,7 +418,7 @@ const INVS=[
   "<code>Notifier.send()</code> 同步；两个后台组件是「守护线程 + threading.Event」。首次通知不阻塞响应靠 <code>queue.Queue</code> + 工作线程，<b>不是</b> FastAPI 的 BackgroundTasks——后者在 TestClient 下会阻塞响应。",
   "pipeline.py · services/scheduler.py · classifier/__init__.py"],
  ["正文归属：NotificationMessage.body 已经是成品",
-  "<code>notification_for_message()</code> 产出的 <code>body</code> 已含「来源 / 分类 / 时间」（提醒类还含「已超时 / 待办 id」）与空行、原文。<b>适配器只负责呈现层的标题，正文一律原样使用 msg.body</b>。曾因两侧各拼一层表头，导致用户看到来源/时间重复两次。",
+  "<code>notification_for_message()</code> 产出的 <code>body</code> 已含「来源 / 分类 / 时间」与空行、原文；<code>notification_for_digest()</code> 的汇总正文同样是成品（逐条明细 + 尾部提示）。<b>适配器只负责呈现层的标题，正文一律原样使用 msg.body</b>。曾因两侧各拼一层表头，导致用户看到来源/时间重复两次。",
   "services/notifications.py · notifiers/feishu.py · notifiers/email.py"]
 ];
 function renderInvs(){

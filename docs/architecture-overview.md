@@ -59,9 +59,9 @@ message/
 | 文件 | 职责 | 关键符号 |
 |---|---|---|
 | `db.py` | 引擎、会话上下文、幂等建表 | `Database`（`session()` 用 `expire_on_commit=False`） |
-| `models.py` | 四张表的 ORM 定义 | `Message` `Todo` `DeliveryRecord` `TodoEvent` |
+| `models.py` | 五张表的 ORM 定义 | `Message` `Todo` `DeliveryRecord` `TodoEvent` `DigestRun` |
 
-**四张表**：
+**五张表**：
 
 | 表 | 一行代表什么 |
 |---|---|
@@ -69,6 +69,7 @@ message/
 | `todos` | 一条需要你处理的待办（状态、首次/上次通知时间、提醒次数、完成时间） |
 | `deliveries` | **每一次投递尝试**（渠道、时间、成功与否、失败原因、是否首选/是否降级） |
 | `todo_events` | 待办的时间序列（创建 / 每次提醒 / 完成），详情页靠它回溯 |
+| `digest_runs` | 某个**本地自然日**的汇总状态（是否已定案/已送达、覆盖待办数、尝试次数、失败原因） |
 
 `todos` 上有一条**部分唯一索引**：`(source, dedup_key) WHERE dedup_key IS NOT NULL AND status='pending'`
 ——保证重复投递不产生重复待办，但待办完成后同样的 key 可以再建。
@@ -102,9 +103,10 @@ message/
 | 文件 | 职责 | 关键符号 |
 |---|---|---|
 | `messages.py` | 消息读写 | `MessageService` `MessageDraft` |
-| `todos.py` | 待办生成/去重/完成/列表/详情，**超时判定** | `TodoService` `TodoView` `TodoDetail` |
-| `notifications.py` | 把消息行渲染成与渠道无关的通知文案 | `notification_for_message()` `format_duration()` |
-| `scheduler.py` | **超时提醒调度**（守护线程，周期扫描） | `ReminderScheduler` |
+| `todos.py` | 待办生成/去重/完成/列表/详情，逐条提醒记账 | `TodoService` `TodoView` `TodoDetail` |
+| `notifications.py` | 把消息行渲染成与渠道无关的通知文案（首次通知与**每日汇总**） | `notification_for_message()` `notification_for_digest()` `format_duration()` |
+| `digest.py` | **每日汇总的状态服务**：按本地日期记录「已检查/已送达/失败重试」 | `DigestService` `DigestState` |
+| `scheduler.py` | **每日汇总调度**（守护线程，周期扫描本地时刻） | `ReminderScheduler` |
 
 ### 2.6 `api/` + `pipeline.py` —— HTTP 接入与受理编排
 
@@ -153,7 +155,7 @@ python -m notify_hub
                  7. DeliveryService               渠道路由与降级
                  8. MessageService / TodoService  领域服务
                  9. IngestPipeline(run_inline=False)  受理 + 后台工作线程
-                10. ReminderScheduler              超时提醒调度
+                10. ReminderScheduler              每日汇总调度（注入 DigestService）
             ├─ app.include_router(create_api_router(ctx))   API + /healthz
             └─ app.include_router(create_web_router(ctx))   Web 页面
 ```
@@ -172,7 +174,7 @@ python -m notify_hub
 |---|---|---|
 | `notify-hub-rule-reloader` | `classifier/__init__.py` | 轮询规则文件 mtime，变更即热加载 |
 | `notify-hub-ingest-worker` | `pipeline.py` | 从队列取 message_id，做首次通知 |
-| `notify-hub-reminder-scheduler` | `services/scheduler.py` | 周期扫描待办，到点发提醒 |
+| `notify-hub-reminder-scheduler` | `services/scheduler.py` | 周期扫描本地时刻，每天到点发一条汇总 |
 
 ---
 
@@ -221,22 +223,29 @@ python -m notify_hub
                  └─ 每一次尝试都写一行 models.py::DeliveryRecord
 ```
 
-### 提醒链路（你没点完成时）
+### 提醒链路（你没点完成时）—— 每天固定本地时间一条汇总
 
 ```
 services/scheduler.py::ReminderScheduler._loop()      （线程 notify-hub-reminder-scheduler）
   └─ 每 scan_interval_seconds 调一次 run_once()
-       ├─ TodoService.due_for_reminder(settings)
-       │    · 尚未提醒过 → 门槛用 first_reminder_after_seconds（默认 8 小时，自 first_notified_at 起）
-       │    · 已提醒过   → 间隔用 reminder_interval_seconds（默认 8 小时，自 last_notified_at 起）
-       ├─ 逐条重读待办（防并发完成），已完成的跳过
-       ├─ notification_for_message(kind=REMINDER, todo=…)
-       │    · 标题变成「[待办超时 8 小时] 原标题」，body 里加「已超时: …」与「待办 id: …」
-       ├─ DeliveryService.deliver(..., todo_id=…)
-       └─ TodoService.record_reminder()
-            · last_notified_at 无条件更新（与投递成败无关）→ 保证「失败后下个周期再试」
-            · reminder_count += 1，写 todo_events(reminder)
+       ├─ 按 settings.timezone 把 clock.now() 换算成本地时间
+       │    · 本地时间尚未到 settings.at（默认 21:00）→ 本轮什么都不做
+       ├─ services/digest.py::DigestService.state_for(today)
+       │    · 当日已定案（已送达，或已记过「空待办」）→ 本轮什么都不做
+       ├─ 本地时间已越过触发时刻 → 第一轮检查就定案
+       │    · 没有未完成待办 → 记 todo_count=0 并定案，当天不再发
+       ├─ 一次性取全部未完成待办（最多 1000 条，按超时时长降序）
+       ├─ services/notifications.py::notification_for_digest(todos, now=…)
+       │    · 标题「[待办汇总] N 项未完成」，正文逐条列「标题 + 已超时 … + 来源/分类」
+       ├─ DeliveryService.deliver(..., preferred_channel=None)   ← 汇总统一走 default_channel
+       │    · 失败 → DigestService 记失败原因，当日下一轮仍会重试（跨天不补发）
+       └─ 成功后逐条记账：TodoService.record_reminder()
+            · 每条待办 last_notified_at / reminder_count 更新，各写一条 todo_events(reminder)
+            · 汇总本身在 deliveries 里只留**一条**记录（message_id / todo_id 均为 None）
 ```
+
+重试与重启都靠 `digest_runs` 表：同一本地日期只有一行，进程重启不会重复发送，
+也不会吞掉当天的汇总。
 
 ### 完成链路（在页面上点「完成」）
 
@@ -247,7 +256,7 @@ Web  POST /todos/{id}/done            或     CLI  notify todo done <id>
                                                        └─ services/todos.py::TodoService.complete()
                                                             · 记录 completed_at，写 todo_events(completed)
                                                             · 幂等：重复完成不改变原完成时间
-                                                            · 此后 due_for_reminder() 永不返回它
+                                                            · 此后不再出现在每日汇总的未完成待办里
 ```
 
 ### 另外两条入口
@@ -290,7 +299,9 @@ SQLite 不保留时区，`DateTime(timezone=True)` 存进去的 aware 时间读�
 ### 5.4 正文归属：`NotificationMessage.body` 已经是成品
 
 `services/notifications.py::notification_for_message()` 产出的 `body` **已经包含**
-`来源`/`分类`/`时间`（提醒类还含 `已超时`/`待办 id`）与空行、原始正文。
+`来源`/`分类`/`时间` 与空行、原始正文；每日汇总的
+`services/notifications.py::notification_for_digest()` 同样把逐条明细原样放进 `body`
+（标题含「[待办汇总] N 项未完成」，明细含「已超时 …」）。
 
 **适配器只负责呈现层的标题，正文一律原样使用 `msg.body`。**
 曾经的缺陷：飞书与邮件适配器各自又拼了一层表头，导致用户看到 `来源`/`时间` 重复两次。

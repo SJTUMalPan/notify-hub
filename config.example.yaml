@@ -13,9 +13,9 @@ rules:
   path: ./rules.yaml
   poll_interval_seconds: 5
 reminders:
+  at: "21:00"
+  timezone: "Asia/Shanghai"
   scan_interval_seconds: 60
-  first_reminder_after_seconds: 28800
-  reminder_interval_seconds: 28800
 default_channel: webhook
 channels:
   - id: webhook

@@ -16,7 +16,7 @@ notify-hub 的配置是一个 YAML 文件，默认路径为 `./config.yaml`，�
 | `server` | 否 | HTTP 服务监听地址、端口与日志级别 |
 | `storage` | 是 | SQLite 数据库文件位置 |
 | `rules` | 是 | 分类规则文件位置与热加载轮询间隔 |
-| `reminders` | 否 | 超时提醒的扫描与提醒间隔 |
+| `reminders` | 否 | 每日汇总提醒的触发时刻、时区与扫描间隔 |
 | `default_channel` | 否 | 规则未指定渠道时的默认渠道 id |
 | `channels` | 否 | 通知渠道实例列表 |
 
@@ -33,9 +33,9 @@ rules:
   path: ./rules.yaml
   poll_interval_seconds: 5
 reminders:
+  at: "21:00"
+  timezone: "Asia/Shanghai"
   scan_interval_seconds: 60
-  first_reminder_after_seconds: 28800
-  reminder_interval_seconds: 28800
 default_channel: webhook
 channels:
   - id: webhook
@@ -103,26 +103,48 @@ SQLite 数据库文件路径。**必填**；相对路径按配置文件所在目
 
 ### reminders
 
-超时提醒参数段。三个参数共同决定「多久扫一次、首次提醒多晚、之后多久提醒一次」。
+每日汇总提醒参数段。提醒模型是「**每天固定本地时间发一条汇总**」，一次列出全部未完成待办，
+不再按每条待办自己的超时时间分别提醒。
+
+### reminders.at
+
+每日汇总的**触发本地时刻**，格式 `HH:MM`（`00:00`–`23:59`），缺省 `21:00`。
+必须匹配 `HH:MM` 且为合法时刻，否则报
+`reminders.at 必须是 HH:MM 格式的本地时刻，实际为 ...` 或 `reminders.at 不是合法时刻，实际为 ...`。
+
+### reminders.timezone
+
+解释 `at` 所用的 **IANA 时区名**，缺省 `Asia/Shanghai`（例如 `UTC`）。
+必须是标准库 `zoneinfo` 能加载的名称，否则报
+`reminders.timezone 不是可加载的 IANA 时区名，实际为 ...`。
+运行环境可能没有系统时区数据库，因此运行时依赖里包含 `tzdata`（PyPI 纯数据包），
+`zoneinfo` 在系统库缺失时会自动回退到它；**不要**改用写死的 UTC 偏移。
 
 ### reminders.scan_interval_seconds
 
-提醒调度线程的扫描间隔（秒），缺省 `60`。必须是数字。
+提醒调度线程的扫描间隔（秒），缺省 `60`。必须是数字，且 **必须 > 0 且 ≤ 3600**（1 小时），
+否则报 `reminders.scan_interval_seconds 必须 > 0 且 <= 3600，...`。
+扫描间隔决定汇总最多比 `at` 迟到多久；扫描线程本身**不会**在精确时刻唤醒。
 
-### reminders.first_reminder_after_seconds
+**触发语义**：
 
-待办创建后首次提醒的延迟（秒），缺省 `28800`（8 小时）。必须是数字。
+- **越过时刻的第一轮检查就定案**：本地时间一越过 `at`，当天的第一轮检查就决定发不发；
+  若当时没有未完成待办，则**不发任何消息**，并记「当日已检查」，当天不再发；
+  当天稍后新建的待办要等**次日**的汇总（因此请把 `at` 设在每天确实会看消息的时刻之前）。
+- **失败当日重试**：投递失败会记录渠道与原因，并在同一自然日内按 `scan_interval_seconds`
+  继续重试，直到成功或跨天。
+- **跨天不补发**：昨天的失败记录不会在次日重试——次日的汇总自然会覆盖仍未完成的待办。
+- **渠道**：汇总只有一条，统一走 `default_channel`（各待办自己的首选渠道无法同时满足），
+  并复用既有的降级链。
+- **重启安全**：当日是否已发/已检查持久化在数据库里，进程在触发时刻之后重启不会重复发送。
 
-### reminders.reminder_interval_seconds
+### 已移除的旧键（出现即报错）
 
-首次提醒之后每次提醒的间隔（秒），缺省 `28800`（8 小时）。必须是数字。
-
-**三者关系与非法组合**：`scan_interval_seconds` 必须不大于
-`first_reminder_after_seconds`，也必须不大于 `reminder_interval_seconds`；
-相等是合法的。违反时报错并拒绝启动：
-
-- `reminders.reminder_interval_seconds(...) 小于 reminders.scan_interval_seconds(...)`
-- `reminders.first_reminder_after_seconds(...) 小于 reminders.scan_interval_seconds(...)`
+旧提醒模型的两个键**已被整体移除**，且**不会被静默忽略**——配置文件里只要出现
+`reminders.first_reminder_after_seconds` 或 `reminders.reminder_interval_seconds`
+（**即使值为空**），服务就拒绝启动并报
+`reminders.first_reminder_after_seconds 已移除（每日汇总提醒不再支持该项）；...`。
+请删除这两个键，改用上面的 `at` 与 `timezone`。
 
 ### default_channel
 
