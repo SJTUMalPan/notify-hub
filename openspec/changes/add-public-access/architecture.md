@@ -83,9 +83,13 @@ class AuthGuard:
     app: Any = None
     token: str | None = None
 ```
-- **字段顺序固定为 `app` 在前**：Starlette 的 `add_middleware(cls, **opts)` 会以
-  `cls(app=<被包裹应用>, **opts)` 构造，因此 `app.add_middleware(AuthGuard, token=T)`
-  能直接工作。不要改动字段顺序，也不要在 `__init__` 里额外要求别的参数。
+- **字段顺序固定为 `app` 在前，这不是风格问题**：Starlette 1.6.0 在
+  `starlette/applications.py:82` 用的是 **`app = cls(app, *args, **kwargs)`——位置传参**，
+  不是关键字。所以被包裹的应用必然落在第一个字段上，`app.add_middleware(AuthGuard, token=T)`
+  才等价于 `AuthGuard(<app>, token=T)`。若把 `token` 放到第一位，那个应用会被绑成令牌、
+  守卫变成关闭状态——**静默失效**，这是最危险的错法。不要改动字段顺序。
+- **一切构造一律用关键字**：`AuthGuard(token=T)`、`AuthGuard(token=None)`。
+  **禁止**位置传参（`AuthGuard(T)` 会把 T 绑到 `app` 上）。
 - `app is None` 仅供纯单元测试使用（只调 `is_authorized` / `expected_cookie`）；
   此时一旦需要透传，**必须抛 `RuntimeError`**，不得静默放行。
 - `token` 为 `None` 或去空白后为空 → **守卫关闭**。
@@ -110,15 +114,26 @@ class AuthGuard:
 3. `scope["path"] == HEALTH_PATH` → 透传。
 4. 解析凭据：
    - `query_token`：对 `scope["query_string"].decode("latin-1")` 用 `parse_qsl(keep_blank_values=True)`，取**第一个** `key == "token"` 的值；值为空串视为**未提供**。
-   - `cookie_value`：取请求头 `cookie`（`scope["headers"]` 中 `name` 小写等于 `b"cookie"` 的**全部**值，用 `"; "` 连接），交给 `http.cookies.SimpleCookie`；**解析异常必须捕获并视为未提供**（畸形 Cookie 头不得导致 500）。
+   - `cookie_value`：取请求头 `cookie`（`scope["headers"]` 中 `name` 小写等于 `b"cookie"` 的**全部**值，用 `"; "` 连接），交给 `http.cookies.SimpleCookie`；**解析异常必须捕获并视为未提供**。
+     *可观测契约*：畸形 Cookie 头最终必须得到 `401` 且**不是 `5xx`**。内部究竟走了捕获分支还是
+     被下游拒绝是**不可观测的**——测试只断言这两点，不要假装能区分内部分支。
 5. 已认证 **且** `query_token` 非空 **且** 请求方法为 `GET` **且** `Accept` 请求头（小写 `accept`）含 `"text/html"`：
    → **不调用内层应用**，直接返回 `303`，`Location: <path>` 或 `<path>?<strip_token_param(原查询串)>`（后者仅当去掉令牌后仍有内容），并带
    `Set-Cookie: nh_session=<expected_cookie()>; HttpOnly; Path=/; SameSite=Lax`。
    **不得**带 `Secure` 属性（部署为纯 HTTP，带上会让浏览器不回传，功能直接坏掉）。
-6. 已认证（其余任何情形，含 `GET /api/v1/todos?token=...`）→ 透传，**不种 Cookie**。
+
+   本步**与路径无关**：`/api/...` 只要满足上述四个条件，同样走本步。判定依据只有
+   `Accept` 与方法——它是「浏览器导航」的信号，不是「页面」的信号。
+6. 已认证且**不满足第 5 步**的任何情形 → 透传，**不种 Cookie**。
+   例：`Accept: application/json` 的 `GET /api/v1/todos?token=T`；任何方法的 `POST`。
+
+   **第 5 步与第 6 步互为补集**：并起来恰好覆盖「已认证」的全部情形，不允许有既满足
+   第 5 步又落入第 6 步的区域（早期版本在这里自相矛盾，测试作者正确地指出了它）。
 7. 未认证 → 返回 `401`：
    - `Accept` 含 `text/html` → `Content-Type: text/html; charset=utf-8`，body 说明需要访问令牌。
-   - 否则 → `Content-Type: application/json`，body 为 `{"detail": "unauthorized"}`。
+   - **否则一律 JSON**——明确包含 `Accept: application/json`、`Accept: */*`，
+     以及**完全没有 `Accept` 头**的情形 → `Content-Type: application/json`，
+     body 为 `{"detail": "unauthorized"}`。
    - 两种情况都**必须**写 `Content-Length`，且响应体不得回显请求携带的任何令牌。
 
 ### 3.3 内部实现
@@ -149,10 +164,10 @@ class AuthGuard:
 | `session_value` 确定性 | 同输入两次调用结果相同；长度为 64；值不等于输入令牌 |
 | `session_value("")` | 抛 `ValueError` |
 | `strip_token_param` | `"a=1&token=X&b=2"` → `"a=1&b=2"`；`"token=X"` → `""`；`"a=1"` → `"a=1"` |
-| 守卫关闭 | `AuthGuard(None).enabled is False`；`is_authorized(cookie_value=None, query_token=None) is True` |
+| 守卫关闭 | `AuthGuard(token=None).enabled is False`；`is_authorized(cookie_value=None, query_token=None) is True` |
 | 守卫关闭时 `expected_cookie()` | 抛 `RuntimeError` |
 | 正确查询令牌 | `is_authorized(cookie_value=None, query_token=T) is True` |
-| 正确 Cookie | `is_authorized(cookie_value=AuthGuard(T).expected_cookie(), query_token=None) is True` |
+| 正确 Cookie | `is_authorized(cookie_value=AuthGuard(token=T).expected_cookie(), query_token=None) is True` |
 | 错误 Cookie / 错误令牌 | 均为 `False`（两种错法各一条用例） |
 | 两者都错 | `False` |
 
@@ -238,3 +253,19 @@ def guarded_app(ctx, token):
 3. 阶段 D：集成测试全绿
 4. 阶段 E：`subagent_review` 复跑全部套件 + 对照 `design.md`/`proposal.md` 查设计符合性
 5. `security-scan` → commit → push
+
+## 6. 规格修订记录
+
+**R1（阶段 A 之后，冻结前）**——测试作者在写测试时报告了两处**规格自身**的缺陷，经核实
+**两处都是架构师写错**，测试与实现均未受影响（此时实现尚不存在，修订零成本）：
+
+| # | 缺陷 | 裁定 |
+|---|---|---|
+| 1 | §3.2 冻结「`app` 字段在前」，而 §3.4 验收表却用 `AuthGuard(T)` 单参数形式——按冻结顺序会把令牌绑到 `app` 上 | **§3.2 正确，§3.4 错**。经查 `starlette/applications.py:82` 是 `cls(app, *args, **kwargs)` **位置传参**，`app` 必须第一。§3.4 全表改为关键字构造，并在 §3.2 明确**禁止位置传参** |
+| 2 | §3.2 第 5 步（已认证 + 查询令牌 + GET + `Accept: text/html` → 303）未排除 `/api/`，第 6 步却把 `GET /api/v1/todos?token=...` 举例为透传——两步不可能同时成立 | **第 5 步正确，第 6 步的举例错**。裁定：第 5 步**与路径无关**（它判定的是「浏览器导航」而非「页面」），第 6 步改为第 5 步的严格补集，举例换成 `Accept: application/json` 的情形 |
+
+另补精确化 3 处（非缺陷，是架构师写得不够死）：畸形 Cookie 的可观测契约（只断言
+`401` 且非 `5xx`）、`Accept` 缺省/`*/*` 归入 JSON 分型、以及构造一律关键字。
+
+**冻结点**：R1 之后 §3 的接口即为最终版。此后任何改动都必须走「重开冻结 → 复核受影响
+测试与实现」的流程。
