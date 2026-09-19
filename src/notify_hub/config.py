@@ -77,7 +77,11 @@ class ReminderSettings:
 
 @dataclass(frozen=True)
 class Settings:
-    """服务运行期配置。路径类字段与数值类字段永不为 None。"""
+    """服务运行期配置。路径类字段与数值类字段永不为 None。
+
+    ``auth_token`` 是 add-public-access 引入的访问令牌：``None`` 表示**不启用鉴权**
+    （刻意的 fail-open 默认，见该变更 ``design.md`` 的 D4）；非 None 时全路由生效。
+    """
 
     db_path: Path
     rules_path: Path
@@ -88,6 +92,7 @@ class Settings:
     channels: tuple[ChannelSpec, ...] = ()
     reminders: ReminderSettings = ReminderSettings()
     log_level: str = "INFO"
+    auth_token: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -324,6 +329,8 @@ def load_settings(
 
     reminders = _parse_reminders(data.get("reminders"))
 
+    auth_token = _parse_auth_token(server)
+
     return Settings(
         db_path=db_path,
         rules_path=rules_path,
@@ -337,19 +344,49 @@ def load_settings(
         channels=channels,
         reminders=reminders,
         log_level=str(server.get("log_level", "INFO")),
+        auth_token=auth_token,
     )
 
 
+def _parse_auth_token(server: Mapping[str, Any]) -> str | None:
+    """解析 ``server.auth_token``（add-public-access）。
+
+    契约（架构师冻结，见该变更 ``architecture.md`` 第 2 节）：
+
+    - 键缺失、或值为 YAML ``null`` → 返回 ``None``＝不启用鉴权
+    - 值必须是**去掉首尾空白后仍非空**的字符串，否则抛 ``ConfigurationError``
+    - 返回值是 ``strip()`` 之后的结果（前后空白不参与比对，避免难以排查的「看起来一样却不通过」）
+    """
+    raw = server.get("auth_token")
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ConfigurationError(
+            f"server.auth_token 必须是字符串，实际是 {type(raw).__name__}"
+            "（缺省或显式 null 表示不启用访问鉴权）"
+        )
+    token = raw.strip()
+    if not token:
+        raise ConfigurationError(
+            "server.auth_token 不能是空白字符串（缺省或显式 null 表示不启用访问鉴权）"
+        )
+    return token
+
+
 def credential_values(settings: Settings) -> tuple[str, ...]:
-    """返回用于日志/记录脱敏的全部密钥字面量（含 URL 内嵌凭据成分）。
+    """返回用于日志/记录脱敏的全部密钥字面量（含 URL 内嵌凭据成分与访问令牌）。
 
     对每个渠道的每个已解析凭据值 ``v``：先加入 ``v`` 本身（非空时）；若 ``v`` 形如 URL，
     再按 :func:`redact.extract_url_secrets` **展开**，把内嵌凭据成分也作为独立密钥加入。
-    最后全局去重，剔除 None 与空串；顺序不作保证。
+    最后并入 ``settings.auth_token``（非空时）。全局去重，剔除 None 与空串；顺序不作保证。
 
     展开是修复一个已确认 P1 泄漏的关键：webhook 渠道的凭据值往往是「完整 URL」，而平台
     错误信息里回显的是 URL 中的**裸 token**；``redact_text`` 做子串匹配，只登记整段 URL
     时文本里的裸 token 匹配不上，明文便会落进投递记录并外泄。
+
+    并入 ``auth_token`` 是 add-public-access 的 D8：访问令牌出现在请求 URL 的查询串里，
+    除了 ``redact_text`` 的 ``token`` 键名规则之外，还需要字面量级别的兜底——令牌一旦以
+    其他形式（记录正文、异常消息）出现，也必须命中。
     """
     values: dict[str, None] = {}
     for channel in settings.channels:
@@ -359,4 +396,8 @@ def credential_values(settings: Settings) -> tuple[str, ...]:
             values.setdefault(value, None)
             for embedded in extract_url_secrets(value):
                 values.setdefault(embedded, None)
+
+    if settings.auth_token:
+        values.setdefault(settings.auth_token, None)
+
     return tuple(values)
