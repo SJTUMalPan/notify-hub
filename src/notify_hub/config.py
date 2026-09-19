@@ -11,9 +11,12 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
+from datetime import time
 from pathlib import Path
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -50,11 +53,26 @@ class ChannelSpec:
 
 @dataclass(frozen=True)
 class ReminderSettings:
-    """超时提醒参数（合法关系在 :func:`load_settings` 中校验）。"""
+    """每日汇总提醒参数（合法关系在 :func:`load_settings` 中校验）。
 
+    ``at`` 是本地时刻 ``HH:MM``，``timezone`` 是 IANA 时区名；二者共同决定每天
+    发出汇总的时刻。旧模型的两个间隔键已被**整体移除**，出现即报错。
+    """
+
+    at: str = "21:00"
+    timezone: str = "Asia/Shanghai"
     scan_interval_seconds: float = 60.0
-    first_reminder_after_seconds: float = 28800.0
-    reminder_interval_seconds: float = 28800.0
+
+    @property
+    def zone(self) -> ZoneInfo:
+        """返回配置时区。加载失败不应发生（``load_settings`` 已校验）。"""
+        return ZoneInfo(self.timezone)
+
+    @property
+    def trigger_time(self) -> time:
+        """返回 ``datetime.time(hh, mm)``，无 tzinfo。"""
+        hour, minute = self.at.split(":")
+        return time(int(hour), int(minute))
 
 
 @dataclass(frozen=True)
@@ -75,6 +93,20 @@ class Settings:
 # --------------------------------------------------------------------------- #
 # 内部辅助
 # --------------------------------------------------------------------------- #
+#: add-daily-digest：已被整体移除的单项超时提醒键。**只在 ``reminders`` 段内检查**；
+#: 出现即报错（键存在即算出现，值为 YAML null 也不例外），不得静默忽略。
+_REMOVED_REMINDER_KEYS = (
+    "first_reminder_after_seconds",
+    "reminder_interval_seconds",
+)
+
+#: ``reminders.at`` 的形状：两位小时 + 冒号 + 两位分钟。
+_AT_PATTERN = re.compile(r"^\d{2}:\d{2}$")
+
+#: ``reminders.scan_interval_seconds`` 的合法上界（含）。
+_SCAN_INTERVAL_MAX = 3600.0
+
+
 def _as_mapping(value: Any, label: str) -> Mapping[str, Any]:
     if value is None:
         return {}
@@ -162,39 +194,49 @@ def _parse_channels(raw: Any, env: Mapping[str, str]) -> tuple[ChannelSpec, ...]
 
 def _parse_reminders(raw: Any) -> ReminderSettings:
     section = _as_mapping(raw, "reminders")
-    settings = ReminderSettings(
-        scan_interval_seconds=_as_float(
-            section.get("scan_interval_seconds", ReminderSettings.scan_interval_seconds),
-            "reminders.scan_interval_seconds",
-        ),
-        first_reminder_after_seconds=_as_float(
-            section.get("first_reminder_after_seconds",
-                        ReminderSettings.first_reminder_after_seconds),
-            "reminders.first_reminder_after_seconds",
-        ),
-        reminder_interval_seconds=_as_float(
-            section.get("reminder_interval_seconds",
-                        ReminderSettings.reminder_interval_seconds),
-            "reminders.reminder_interval_seconds",
-        ),
-    )
 
-    # 边界语义：严格小于才报错；`==` 是合法配置。
-    if settings.reminder_interval_seconds < settings.scan_interval_seconds:
+    # 旧键检查范围：只在 reminders 段内；判据是「键存在」，与值无关。
+    for removed_key in _REMOVED_REMINDER_KEYS:
+        if removed_key in section:
+            raise ConfigurationError(
+                f"reminders.{removed_key} 已移除（每日汇总提醒不再支持该项）；"
+                "请改用 reminders.at 与 reminders.timezone"
+            )
+
+    at_raw = section.get("at", ReminderSettings.at)
+    at_value = str(at_raw)
+    if not _AT_PATTERN.match(at_value):
         raise ConfigurationError(
-            "reminders.reminder_interval_seconds"
-            f"({settings.reminder_interval_seconds}) 小于 "
-            "reminders.scan_interval_seconds"
-            f"({settings.scan_interval_seconds})"
+            f"reminders.at 必须是 HH:MM 格式的本地时刻，实际为 {at_raw!r}"
         )
-    if settings.first_reminder_after_seconds < settings.scan_interval_seconds:
+    hour, minute = (int(part) for part in at_value.split(":"))
+    if hour > 23 or minute > 59:
+        raise ConfigurationError(f"reminders.at 不是合法时刻，实际为 {at_raw!r}")
+
+    timezone_raw = section.get("timezone", ReminderSettings.timezone)
+    timezone_value = str(timezone_raw)
+    try:
+        ZoneInfo(timezone_value)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
         raise ConfigurationError(
-            "reminders.first_reminder_after_seconds"
-            f"({settings.first_reminder_after_seconds}) 小于 "
-            "reminders.scan_interval_seconds"
-            f"({settings.scan_interval_seconds})"
+            f"reminders.timezone 不是可加载的 IANA 时区名，实际为 {timezone_raw!r}"
+        ) from exc
+
+    scan_interval = _as_float(
+        section.get("scan_interval_seconds", ReminderSettings.scan_interval_seconds),
+        "reminders.scan_interval_seconds",
+    )
+    if scan_interval <= 0 or scan_interval > _SCAN_INTERVAL_MAX:
+        raise ConfigurationError(
+            "reminders.scan_interval_seconds 必须 > 0 且 <= 3600，"
+            f"实际为 {scan_interval!r}"
         )
-    return settings
+
+    return ReminderSettings(
+        at=at_value,
+        timezone=timezone_value,
+        scan_interval_seconds=scan_interval,
+    )
 
 
 def _read_config_file(config_path: Path) -> Mapping[str, Any]:

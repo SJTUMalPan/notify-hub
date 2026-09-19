@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -28,7 +28,8 @@ from notify_hub.domain import AckReason, DeliveryEvent, Level, TodoEventKind, To
 UTC = timezone.utc
 T0 = datetime(2024, 5, 1, 12, 0, 0, tzinfo=UTC)
 
-TABLES = {"messages", "todos", "deliveries", "todo_events"}
+#: add-daily-digest 新增 ``digest_runs``（第五张表）。
+TABLES = {"messages", "todos", "deliveries", "todo_events", "digest_runs"}
 
 
 # --------------------------------------------------------------------------- #
@@ -123,6 +124,21 @@ def _todo_event(models, todo_id, **overrides):
     return models.TodoEvent(**values)
 
 
+def _digest_run(models, **overrides):
+    """``DigestRun`` 的最小合法行（add-daily-digest 第 3.2 节冻结签名）。"""
+    values = {
+        "local_date": date(2024, 5, 1),
+        "checked_at": T0,
+        "fired_at": None,
+        "todo_count": 0,
+        "delivered": False,
+        "attempts": 0,
+        "last_error": None,
+    }
+    values.update(overrides)
+    return models.DigestRun(**values)
+
+
 def _insert(db, obj) -> int:
     """在 ``db.session()`` 中插入并返回主键（flush 取 id，退出时由上下文管理器提交）。"""
     with db.session() as session:
@@ -139,7 +155,8 @@ def _count(db, entity) -> int:
 # --------------------------------------------------------------------------- #
 # 1. 建表
 # --------------------------------------------------------------------------- #
-def test_init_schema_creates_the_four_tables(tmp_path):
+def test_init_schema_creates_the_five_tables(tmp_path):
+    """第 3.4 节 7（前半）：`init_schema()` 后 `digest_runs` 表存在。"""
     database, _models = _env(tmp_path)
     names = set(inspect(database.engine).get_table_names())
     assert TABLES <= names, names
@@ -543,3 +560,124 @@ def test_init_schema_creates_missing_parent_directory(tmp_path):
     assert db_path.parent.is_dir()
     assert db_path.exists()
     assert TABLES <= set(inspect(database.engine).get_table_names())
+
+
+# --------------------------------------------------------------------------- #
+# add-daily-digest 第 3.4 节 7–9：``digest_runs`` 表（每日汇总的持久化状态）
+#
+# 说明（移除项）：本文件**没有**删除任何用例。这里原有的 ``last_notified_at`` /
+# ``reminder_count`` / ``DeliveryEvent.REMINDER`` 断言**不是**被移除的特性——
+# 规格的 Migration 明确写着这些字段「语义保留但含义变为最近一次被汇总提醒」，
+# 因此相关用例（``test_todo_defaults_are_pending_and_zero_reminders``、
+# 关联查询等）继续有效，只增加了新表。
+# --------------------------------------------------------------------------- #
+def _digest_row(database, models, **overrides) -> int:
+    return _insert(database, _digest_run(models, **overrides))
+
+
+def test_digest_runs_table_exists_after_init_schema(tmp_path):
+    """第 7 条（前半）：`digest_runs` 表名出现在 metadata 中。"""
+    database, _models = _env(tmp_path)
+
+    assert "digest_runs" in set(inspect(database.engine).get_table_names())
+
+
+def test_init_schema_is_idempotent_for_digest_runs(tmp_path):
+    """第 7 条（后半）：连续两次 `init_schema()` 幂等，且既有 digest 行不丢。"""
+    database, models = _env(tmp_path)
+    _digest_row(
+        database,
+        models,
+        local_date=date(2024, 5, 2),
+        checked_at=T0,
+        todo_count=3,
+        delivered=True,
+        attempts=1,
+    )
+
+    database.init_schema()
+    database.init_schema()
+
+    assert _count(database, models.DigestRun) == 1
+    with database.session() as session:
+        row = session.scalars(select(models.DigestRun)).one()
+        assert row.local_date == date(2024, 5, 2)
+        assert row.todo_count == 3
+        assert row.delivered is True
+
+
+def test_digest_run_local_date_is_unique(tmp_path):
+    """第 8 条：同一 `local_date` 插入两条 -> IntegrityError。"""
+    database, models = _env(tmp_path)
+    _digest_row(database, models, local_date=date(2024, 5, 3))
+
+    with pytest.raises(IntegrityError):
+        _digest_row(database, models, local_date=date(2024, 5, 3), attempts=1)
+
+    assert _count(database, models.DigestRun) == 1
+
+
+def test_digest_run_round_trip_of_all_fields(tmp_path):
+    """第 9 条：各字段往返一致；`checked_at` / `fired_at` 经 `as_utc()` 等于写入值。"""
+    database, models = _env(tmp_path)
+    local_date = date(2024, 5, 4)
+    checked_at = datetime(2024, 5, 4, 13, 0, 0, 123456, tzinfo=UTC)
+    fired_at = datetime(2024, 5, 4, 13, 0, 30, tzinfo=UTC)
+
+    digest_id = _digest_row(
+        database,
+        models,
+        local_date=local_date,
+        checked_at=checked_at,
+        fired_at=fired_at,
+        todo_count=7,
+        delivered=True,
+        attempts=2,
+        last_error="渠道不可用",
+    )
+
+    with database.session() as session:
+        row = session.get(models.DigestRun, digest_id)
+        assert row.id == digest_id
+        assert row.local_date == local_date
+        assert as_utc(row.checked_at) == checked_at
+        assert as_utc(row.fired_at) == fired_at
+        assert row.todo_count == 7
+        assert row.delivered is True
+        assert row.attempts == 2
+        assert row.last_error == "渠道不可用"
+
+
+def test_digest_run_nullable_columns_round_trip(tmp_path):
+    """第 9 条（可空列）：`fired_at` / `last_error` 写入 None 后读回仍为 None。"""
+    database, models = _env(tmp_path)
+    digest_id = _digest_row(
+        database,
+        models,
+        local_date=date(2024, 5, 5),
+        checked_at=T0,
+        fired_at=None,
+        last_error=None,
+    )
+
+    with database.session() as session:
+        row = session.get(models.DigestRun, digest_id)
+        assert row.fired_at is None
+        assert row.last_error is None
+
+
+def test_digest_run_defaults_match_frozen_signature(tmp_path):
+    """第 3.2 节冻结签名：只给 `local_date` / `checked_at` 时其余列取模型缺省值。"""
+    database, models = _env(tmp_path)
+    digest_id = _insert(
+        database,
+        models.DigestRun(local_date=date(2024, 5, 6), checked_at=T0),
+    )
+
+    with database.session() as session:
+        row = session.get(models.DigestRun, digest_id)
+        assert row.fired_at is None
+        assert row.todo_count == 0
+        assert row.delivered is False
+        assert row.attempts == 0
+        assert row.last_error is None

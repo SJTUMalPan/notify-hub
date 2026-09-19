@@ -64,6 +64,10 @@ def tmp_settings(tmp_path: Path):
 
     刻意不声明任何渠道、``default_channel`` 为 null——这样测试注入的注册表完全掌控投递，
     投递记录里的 ``is_preferred``/``is_fallback`` 判定不会被配置干扰。
+
+    **add-daily-digest 后提醒为「每日汇总」**：``ManualClock`` 起点为
+    ``2024-01-01T00:00Z`` ＝ 北京时间 **08:00**，早于触发时刻 21:00，
+    因此不主动推进时钟的用例不会意外触发汇总。
     """
     from notify_hub.config import load_settings  # M1，惰性
 
@@ -73,9 +77,11 @@ def tmp_settings(tmp_path: Path):
         "storage": {"db_path": "./data/notify.db"},
         "rules": {"path": "./rules.yaml", "poll_interval_seconds": 5},
         "reminders": {
+            # 旧键 first_reminder_after_seconds / reminder_interval_seconds 已被移除；
+            # 配置里再出现它们会让 load_settings 直接报错（刻意的，不静默忽略）。
+            "at": "21:00",
+            "timezone": "Asia/Shanghai",
             "scan_interval_seconds": 1,
-            "first_reminder_after_seconds": 2,
-            "reminder_interval_seconds": 3,
         },
         "default_channel": None,
         "channels": [],

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import textwrap
+from datetime import time
 from pathlib import Path
 
 import pytest
@@ -29,10 +30,13 @@ storage:
 rules:
   path: ./rules.yaml
   poll_interval_seconds: 7
+# add-daily-digest：提醒段已整体更换。旧键 first_reminder_after_seconds /
+# reminder_interval_seconds 属于**已被移除**的「单项超时间隔提醒」，出现即 ConfigurationError
+# （见第 3.4 节第 6 条），因此合法配置里不得再出现它们。
 reminders:
+  at: "21:00"
+  timezone: "Asia/Shanghai"
   scan_interval_seconds: 60
-  first_reminder_after_seconds: 1800
-  reminder_interval_seconds: 3600
 default_channel: webhook
 channels:
   - id: webhook
@@ -100,10 +104,10 @@ def test_load_settings_parses_every_key(tmp_path: Path) -> None:
     assert settings.rules_path.is_absolute()
     assert settings.rules_path == root / "rules.yaml"
 
-    # 提醒参数
+    # 提醒参数（add-daily-digest：每日固定本地时刻汇总）
+    assert settings.reminders.at == "21:00"
+    assert settings.reminders.timezone == "Asia/Shanghai"
     assert settings.reminders.scan_interval_seconds == 60
-    assert settings.reminders.first_reminder_after_seconds == 1800
-    assert settings.reminders.reminder_interval_seconds == 3600
 
     # 渠道：顺序、字段与 params 原样保留
     assert len(settings.channels) == 2
@@ -288,80 +292,19 @@ def test_duplicate_channel_id(tmp_path: Path) -> None:
     assert "dup" in str(excinfo.value)
 
 
-def test_reminder_interval_smaller_than_scan_interval(tmp_path: Path) -> None:
-    path = _write_config(
-        tmp_path,
-        """\
-        storage:
-          db_path: ./data/notify.db
-        rules:
-          path: ./rules.yaml
-        reminders:
-          scan_interval_seconds: 60
-          first_reminder_after_seconds: 1800
-          reminder_interval_seconds: 10
-        """,
-    )
-
-    with pytest.raises(ConfigurationError) as excinfo:
-        _load(path)
-
-    message = str(excinfo.value)
-    assert "reminder_interval_seconds" in message
-    assert "scan_interval_seconds" in message
-    assert "10" in message
-    assert "60" in message
-
-
-def test_first_reminder_threshold_smaller_than_scan_interval(tmp_path: Path) -> None:
-    path = _write_config(
-        tmp_path,
-        """\
-        storage:
-          db_path: ./data/notify.db
-        rules:
-          path: ./rules.yaml
-        reminders:
-          scan_interval_seconds: 60
-          first_reminder_after_seconds: 5
-          reminder_interval_seconds: 3600
-        """,
-    )
-
-    with pytest.raises(ConfigurationError) as excinfo:
-        _load(path)
-
-    message = str(excinfo.value)
-    assert "first_reminder_after_seconds" in message
-    assert "scan_interval_seconds" in message
-    assert "5" in message
-    assert "60" in message
-
-
-def test_reminder_bounds_equal_to_scan_interval_are_valid(tmp_path: Path) -> None:
-    """边界语义（architecture.md M1「边界语义」）：判定式是严格小于，`==` 合法。
-
-    即三个参数同为 60 时必须加载成功（拒绝会误伤「每个扫描周期都可提醒」的合法配置）。
-    """
-    path = _write_config(
-        tmp_path,
-        """\
-        storage:
-          db_path: ./data/notify.db
-        rules:
-          path: ./rules.yaml
-        reminders:
-          scan_interval_seconds: 60
-          first_reminder_after_seconds: 60
-          reminder_interval_seconds: 60
-        """,
-    )
-
-    settings = _load(path)  # MUST NOT 抛 ConfigurationError
-
-    assert settings.reminders.scan_interval_seconds == 60
-    assert settings.reminders.first_reminder_after_seconds == 60
-    assert settings.reminders.reminder_interval_seconds == 60
+# --------------------------------------------------------------------------- #
+# 【已移除特性】以下 3 个用例测的是「单项超时间隔提醒」，该特性被 add-daily-digest
+# **整体移除**（参见 openspec/changes/add-daily-digest/specs/todo-tracking/spec.md 的
+# REMOVED Requirements），因此连同断言一并删除——不是为了让新代码变绿而放宽断言：
+#   * test_reminder_interval_smaller_than_scan_interval
+#       -> 校验 reminders.reminder_interval_seconds 与 scan_interval_seconds 的大小关系；
+#          旧键已被移除，出现即 ConfigurationError（见本文件第 3.4 节 6 的新用例）。
+#   * test_first_reminder_threshold_smaller_than_scan_interval
+#       -> 校验 reminders.first_reminder_after_seconds 的提醒门槛；同上，旧键已移除。
+#   * test_reminder_bounds_equal_to_scan_interval_are_valid
+#       -> 旧三参数「严格小于才报错、`==` 合法」的边界语义；新模型只剩 scan_interval_seconds
+#          一个数值参数，其边界（0 / 3600 / 3601）改由本文件第 3.4 节 5 的新用例覆盖。
+# --------------------------------------------------------------------------- #
 
 
 def test_configuration_error_messages_contain_no_credential_value(tmp_path: Path) -> None:
@@ -374,8 +317,13 @@ def test_configuration_error_messages_contain_no_credential_value(tmp_path: Path
 
     cases = {
         "bad-default-channel": VALID_CONFIG.replace("default_channel: webhook", "default_channel: nope"),
-        "bad-reminder": VALID_CONFIG.replace("reminder_interval_seconds: 3600",
-                                            "reminder_interval_seconds: 1"),
+        # 旧用例用 reminder_interval_seconds < scan_interval_seconds 触发错误；该键已被移除，
+        # 改用新模型的非法 at（第 3.4 节 3）触发同类 ConfigurationError，保持本用例的原意
+        # （只验「错误消息不泄漏凭据」这一横向要求）。
+        "bad-reminder-at": VALID_CONFIG.replace('at: "21:00"', 'at: "25:00"'),
+        "bad-reminder-timezone": VALID_CONFIG.replace(
+            'timezone: "Asia/Shanghai"', 'timezone: "Mars/Olympus"'
+        ),
         "bad-yaml": "storage: {db_path: ./x.db\n",
     }
     for name, body in cases.items():
@@ -610,10 +558,13 @@ def test_channel_with_all_credentials_unset_is_simply_incomplete(tmp_path: Path)
 def test_dataclass_defaults_match_spec() -> None:
     from notify_hub.config import ReminderSettings, Settings
 
+    # add-daily-digest 第 3.4 节 1：ReminderSettings 的整体替换。
+    # 旧默认值 first_reminder_after_seconds=28800.0 / reminder_interval_seconds=28800.0
+    # 属于**已被移除**的单项超时提醒模型，此处不再断言其存在（见第 3.4 节 27 的字段集合用例）。
     reminders = ReminderSettings()
+    assert reminders.at == "21:00"
+    assert reminders.timezone == "Asia/Shanghai"
     assert reminders.scan_interval_seconds == 60.0
-    assert reminders.first_reminder_after_seconds == 28800.0
-    assert reminders.reminder_interval_seconds == 28800.0
 
     fields = Settings.__dataclass_fields__
     assert fields["rules_poll_interval_seconds"].default == 5.0
@@ -632,3 +583,199 @@ def test_config_path_falls_back_to_env_var(tmp_path: Path, monkeypatch) -> None:
     settings = _load()
 
     assert settings.db_path == tmp_path.resolve() / "data" / "notify.db"
+
+
+# --------------------------------------------------------------------------- #
+# add-daily-digest 第 3.4 节 1–6（配置）+ 27（移除项）：
+# 每日汇总提醒的配置契约；旧提醒键必须报错、不得静默忽略。
+#
+# 本段的用例**自带 YAML 配置**（只依赖 tmp_path），不使用 conftest 的 tmp_settings /
+# db / ctx —— 那些 fixture 在阶段 B 末尾才会同步为新键，依赖它们会造成「共享 fixture
+# 未同步」的假红，掩盖真正的「实现缺失」红。
+# --------------------------------------------------------------------------- #
+def _reminder_config(reminder_lines: str) -> str:
+    """把 ``reminders:`` 段的 YAML 片段包成一份最小可加载配置。"""
+    body = textwrap.dedent(reminder_lines).strip("\n")
+    return (
+        "storage:\n"
+        "  db_path: ./data/notify.db\n"
+        "rules:\n"
+        "  path: ./rules.yaml\n"
+        "reminders:\n" + textwrap.indent(body, "  ") + "\n"
+    )
+
+
+def _load_reminders(directory: Path, reminder_lines: str):
+    return _load(_write_config(directory, _reminder_config(reminder_lines)))
+
+
+# --- 第 1 条：默认值、trigger_time、zone ------------------------------------ #
+def test_reminder_trigger_time_and_zone_defaults() -> None:
+    """第 1 条：`trigger_time == time(21, 0)`、`zone.key == "Asia/Shanghai"`。"""
+    from notify_hub.config import ReminderSettings
+
+    reminders = ReminderSettings()
+
+    assert reminders.trigger_time == time(21, 0)
+    assert reminders.trigger_time.tzinfo is None      # 冻结契约：无 tzinfo
+    assert reminders.zone.key == "Asia/Shanghai"
+
+
+def test_missing_reminders_section_yields_daily_digest_defaults(tmp_path: Path) -> None:
+    """第 1 条（加载路径）：未写 reminders 段时，落到新的默认值。"""
+    path = _write_config(
+        tmp_path,
+        """\
+        storage:
+          db_path: ./data/notify.db
+        rules:
+          path: ./rules.yaml
+        """,
+    )
+
+    settings = _load(path)
+
+    assert settings.reminders.at == "21:00"
+    assert settings.reminders.timezone == "Asia/Shanghai"
+    assert settings.reminders.scan_interval_seconds == 60.0
+    assert settings.reminders.trigger_time == time(21, 0)
+
+
+# --- 第 2 条：合法自定义 ----------------------------------------------------- #
+def test_custom_trigger_time_and_timezone_are_parsed(tmp_path: Path) -> None:
+    """第 2 条：`at: "07:30"` + `timezone: UTC` 解析成功且 `trigger_time == time(7, 30)`。"""
+    settings = _load_reminders(
+        tmp_path, 'at: "07:30"\ntimezone: UTC\nscan_interval_seconds: 60'
+    )
+
+    assert settings.reminders.at == "07:30"
+    assert settings.reminders.timezone == "UTC"
+    assert settings.reminders.trigger_time == time(7, 30)
+    assert settings.reminders.zone.key == "UTC"
+
+
+@pytest.mark.parametrize("value", ["00:00", "23:59", "07:30"])
+def test_valid_at_boundaries_are_accepted(tmp_path: Path, value: str) -> None:
+    """决策 7：合法时刻区间是 00:00–23:59（两端点都合法）。"""
+    settings = _load_reminders(
+        tmp_path, f'at: "{value}"\ntimezone: UTC\nscan_interval_seconds: 60'
+    )
+
+    hour, minute = (int(part) for part in value.split(":"))
+    assert settings.reminders.trigger_time == time(hour, minute)
+
+
+# --- 第 3 条：非法 at -------------------------------------------------------- #
+@pytest.mark.parametrize("value", ["25:00", "21:60", "9", "abc"])
+def test_invalid_at_reports_key_and_value(tmp_path: Path, value: str) -> None:
+    """第 3 条：非法 `at` -> ConfigurationError，消息含键名与非法值。"""
+    path = _write_config(
+        tmp_path, _reminder_config(f'at: "{value}"\ntimezone: UTC\nscan_interval_seconds: 60')
+    )
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        _load(path)
+
+    message = str(excinfo.value)
+    assert "at" in message, message
+    assert value in message, message
+
+
+# --- 第 4 条：非法 timezone -------------------------------------------------- #
+def test_invalid_timezone_reports_key_and_value(tmp_path: Path) -> None:
+    """第 4 条：`Mars/Olympus` -> ConfigurationError，消息含键名与非法值。"""
+    path = _write_config(
+        tmp_path,
+        _reminder_config('at: "21:00"\ntimezone: Mars/Olympus\nscan_interval_seconds: 60'),
+    )
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        _load(path)
+
+    message = str(excinfo.value)
+    assert "timezone" in message, message
+    assert "Mars/Olympus" in message, message
+
+
+# --- 第 5 条：scan_interval_seconds 边界 ------------------------------------- #
+@pytest.mark.parametrize("value", [0, 3601])
+def test_scan_interval_out_of_range_is_rejected(tmp_path: Path, value: int) -> None:
+    """第 5 条：`0` 与 `3601` -> ConfigurationError（必须 > 0 且 <= 3600）。"""
+    path = _write_config(
+        tmp_path,
+        _reminder_config(f'at: "21:00"\ntimezone: UTC\nscan_interval_seconds: {value}'),
+    )
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        _load(path)
+
+    message = str(excinfo.value)
+    assert "scan_interval_seconds" in message, message
+    if value != 0:
+        assert str(value) in message, message
+
+
+def test_scan_interval_upper_bound_is_valid(tmp_path: Path) -> None:
+    """第 5 条：`3600` 合法（判据是 `>` 而非 `>=`）。"""
+    settings = _load_reminders(
+        tmp_path, 'at: "21:00"\ntimezone: UTC\nscan_interval_seconds: 3600'
+    )
+
+    assert settings.reminders.scan_interval_seconds == 3600
+
+
+# --- 第 6 条：被移除的旧键出现即报错 ----------------------------------------- #
+@pytest.mark.parametrize(
+    "key", ["first_reminder_after_seconds", "reminder_interval_seconds"]
+)
+def test_removed_reminder_key_is_rejected(tmp_path: Path, key: str) -> None:
+    """第 6 条：旧键出现 -> ConfigurationError，消息含键名与「已移除」字样。
+
+    禁止项：不得为了兼容旧配置而静默忽略这两个键。
+    """
+    path = _write_config(
+        tmp_path, _reminder_config(f'at: "21:00"\ntimezone: UTC\n{key}: 1800')
+    )
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        _load(path)
+
+    message = str(excinfo.value)
+    assert key in message, message
+    assert "已移除" in message, message
+
+
+@pytest.mark.parametrize(
+    "key", ["first_reminder_after_seconds", "reminder_interval_seconds"]
+)
+def test_removed_reminder_key_without_value_is_still_rejected(tmp_path: Path, key: str) -> None:
+    """第 6 条：旧键「出现」即报错，值为空（YAML null）也不例外。
+
+    依据 architecture.md 3.3「禁止项」的措辞——`出现即 ConfigurationError`：
+    判据是**键存在**，不是「值非空」。
+    """
+    path = _write_config(
+        tmp_path, _reminder_config(f'at: "21:00"\ntimezone: UTC\n{key}:')
+    )
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        _load(path)
+
+    message = str(excinfo.value)
+    assert key in message, message
+    assert "已移除" in message, message
+
+
+# --- 第 27 条（移除项验证）：字段集合恰好是新三元组 --------------------------- #
+def test_reminder_settings_fields_are_exactly_the_new_trio() -> None:
+    """第 27 条：字段集合**恰好**是 {at, timezone, scan_interval_seconds}。
+
+    旧提醒模型的字段不得以任何形式残留（包括兼容垫片）。
+    """
+    from notify_hub.config import ReminderSettings
+
+    assert set(ReminderSettings.__dataclass_fields__) == {
+        "at",
+        "timezone",
+        "scan_interval_seconds",
+    }

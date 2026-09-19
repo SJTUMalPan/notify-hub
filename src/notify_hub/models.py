@@ -1,6 +1,6 @@
 """M2 的 SQLModel 表定义。
 
-四张表：``messages`` / ``todos`` / ``deliveries`` / ``todo_events``。
+五张表：``messages`` / ``todos`` / ``deliveries`` / ``todo_events`` / ``digest_runs``。
 本模块只做**结构声明**（列、约束、缺省值），不含业务方法、不含查询逻辑，
 也不负责时间归一化（调用方读出时间列后必须经 ``clock.as_utc()`` 再参与计算，见架构 1.2 节）。
 
@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import JSON, Column, DateTime, Index, text
@@ -25,7 +25,7 @@ from sqlmodel import Field, SQLModel
 
 from .domain import Level, TodoStatus
 
-__all__ = ["Message", "Todo", "DeliveryRecord", "TodoEvent"]
+__all__ = ["Message", "Todo", "DeliveryRecord", "TodoEvent", "DigestRun"]
 
 #: 部分唯一索引的 WHERE 条件（SQLite 与 Postgres 共用同一语义）。
 _PARTIAL_UNIQUE_WHERE = "dedup_key IS NOT NULL AND status = 'pending'"
@@ -132,3 +132,23 @@ class TodoEvent(SQLModel, table=True):
     )
     channel_id: str | None = Field(default=None)
     delivery_ok: bool | None = Field(default=None)
+
+
+class DigestRun(SQLModel, table=True):
+    """某个本地自然日的每日汇总状态（add-daily-digest）。
+
+    每天至多一行（``local_date`` 唯一）：既记录「当日已检查/已发送」以免重复打扰，
+    也承载失败重试的次数与最近一次原因（``last_error`` 由调用方保证已脱敏）。
+    时间列读出后必须经 ``clock.as_utc()`` 再参与计算。
+    """
+
+    __tablename__ = "digest_runs"
+
+    id: int | None = Field(default=None, primary_key=True)
+    local_date: date = Field(unique=True, index=True)
+    checked_at: datetime = Field(sa_type=DateTime(timezone=True))
+    fired_at: datetime | None = Field(default=None, sa_type=DateTime(timezone=True))
+    todo_count: int = Field(default=0)
+    delivered: bool = Field(default=False)
+    attempts: int = Field(default=0)
+    last_error: str | None = Field(default=None)
