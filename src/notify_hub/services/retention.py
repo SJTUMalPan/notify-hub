@@ -112,7 +112,16 @@ class RetentionService:
     # 内部辅助
     # ------------------------------------------------------------------ #
     def _utc_boundary(self, local_date: date) -> datetime:
-        """``local_date`` 本地 00:00 对应的 naive UTC 时刻（与库内时间列同格式）。"""
+        """``local_date`` 本地 00:00 对应的 naive UTC 时刻（与库内时间列同格式）。
+
+        ``date.min`` 的「本地 00:00」换算到 UTC 会越过 ``datetime.min`` 而抛
+        ``OverflowError``（``days`` 极大时 ``cutoff_date()`` 正是返回 ``date.min``）。
+        按 ``cutoff_date()`` 的语义「没有任何记录早于 ``date.min``」，此处直接返回
+        ``datetime.min``——它是所有库内时间的下界，比较结果恒为「不删任何东西」，
+        于是溢出根本不会发生，无需在回收路径里捕获或掩盖异常。
+        """
+        if local_date == date.min:
+            return datetime.min
         start = datetime.combine(local_date, time.min).replace(tzinfo=self._zone)
         return as_utc(start).replace(tzinfo=None)
 
