@@ -48,6 +48,12 @@
 **时间基准**：一律先把时间戳换算到本地时区（`settings.reminders.zone`，即 `Asia/Shanghai`）
 再取日期。待办用 `completed_at`，消息用 `received_at`，汇总用 `digest_runs.local_date`。
 
+**「不留悬空引用」覆盖全部三个外键**：回收后不得存在
+`deliveries.todo_id`、`todo_events.todo_id`、`deliveries.message_id` 指向已不存在的行。
+前两个靠 §3 的删除顺序保证；第三个由 `PRAGMA foreign_keys=ON` 在数据库层兜底
+（删消息前必须先删它的投递记录，否则删除本身会被拒绝）。
+**禁止**在回收前临时关闭外键强制。
+
 **禁止**在回收路径里调用 `datetime.now()`——必须用注入的 `Clock`（跨模块不变量）。
 
 ## 4. 模块 M-A：数据保留与自动回收
@@ -90,6 +96,10 @@ class PurgeReport:
         """是否什么都没删、也没解绑。"""
 ```
 
+**两个计数字段度量的是不同的事，允许重叠**：同一行投递记录可能先在第 1 步被解绑
+（计入 `deliveries_unlinked`），随后在第 2 步随其消息被删（计入 `deliveries`）。
+`deleted_total` 只统计**真正被删除**的行，绝不包含 `deliveries_unlinked`。
+
 ```python
 class RetentionService:
     def __init__(
@@ -127,7 +137,11 @@ class RetentionService:
   且 `deliveries_unlinked == 0`。
 - **错误契约**：不吞异常，由调用方隔离（调度器已整体兜异常）。
 - 日志：`deleted_total > 0` 或 `deliveries_unlinked > 0` 时打**一条** INFO，含各字段计数；
-  什么都没发生时**不打日志**。
+  什么都没发生时**不打日志**。日志经**注入的 `logger`** 发出（缺省用
+  `logging.getLogger("notify_hub.services.retention")`），级别为 INFO。文案不冻结，
+  但必须含各类计数——测试只断言「恰好一条 INFO」，不校验文案。
+- **前提**：`days >= 0` 由配置层保证（`_parse_retention` 拒绝负值），本类不做重复校验；
+  `days < 0` 不是受支持的输入。
 
 ### 4.3 内部实现
 
@@ -203,7 +217,7 @@ class RetentionService:
 | `digest_runs` 按 `local_date` 删 | 100 天前的记录没了，今天的不动 |
 | `days=0` 关闭 | 什么都不删，返回全 0 |
 | **幂等** | 连续跑两次：第二次 `deleted_total == 0` 且 `deliveries_unlinked == 0` |
-| **无悬空引用** | 回收后查库：不存在 `deliveries.todo_id` / `todo_events.todo_id` 指向已不存在的 todo |
+| **无悬空引用** | 回收后查库：不存在 `deliveries.todo_id` / `todo_events.todo_id` 指向已不存在的待办，也不存在 `deliveries.message_id` 指向已不存在的消息 |
 | `completed_at` 为 NULL 的 done 待办 | 不删（保守处理） |
 
 **调度器集成测试（同一文件内，用 `ManualClock` 推进，禁止真实等待）**
