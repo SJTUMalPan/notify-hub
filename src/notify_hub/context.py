@@ -27,6 +27,7 @@ from notify_hub.notifiers import NotifierRegistry
 from notify_hub.pipeline import IngestPipeline
 from notify_hub.services.digest import DigestService
 from notify_hub.services.messages import MessageService
+from notify_hub.services.retention import RetentionService
 from notify_hub.services.scheduler import ReminderScheduler
 from notify_hub.services.todos import TodoService
 
@@ -50,6 +51,7 @@ class AppContext:
     messages: MessageService
     todos: TodoService
     digest: DigestService
+    retention: RetentionService
     pipeline: IngestPipeline
     scheduler: ReminderScheduler
 
@@ -118,6 +120,16 @@ def _assemble(
         run_inline=run_inline,
     )
 
+    # 11.5 数据保留（add-retention-and-web-ui）：调度器在每日结算点调用它，
+    #     网页的「清空已完成」按钮也走它——没有第二处删除逻辑。
+    retention = RetentionService(
+        db,
+        resolved_clock,
+        days=settings.retention.days,
+        zone=settings.reminders.zone,
+        logger=logger,
+    )
+
     # 12. 每日汇总调度。
     scheduler = ReminderScheduler(
         todos=todos,
@@ -126,6 +138,7 @@ def _assemble(
         clock=resolved_clock,
         settings=settings.reminders,
         logger=logger,
+        retention=retention,
     )
 
     return AppContext(
@@ -139,6 +152,7 @@ def _assemble(
         messages=messages,
         todos=todos,
         digest=digest,
+        retention=retention,
         pipeline=pipeline,
         scheduler=scheduler,
     )
