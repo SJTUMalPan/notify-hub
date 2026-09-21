@@ -1,0 +1,313 @@
+# 架构与模块规格：add-retention-and-web-ui
+
+> 本文件是**冻结接口**的唯一来源。子代理任务书只引用章节号，不重述内容。
+> 设计基线见 `design.md`；决策编号（D1–D8）在那边。
+
+## 1. 交付范围与规模
+
+| 项 | 值 |
+|---|---|
+| 模块数 | **2**（M-A 数据保留、M-B 待办网页） |
+| 预计派发次数 | **6**（每模块：测试 1 + 实现 1，外加集成 1 + 审查 1） |
+| 阈值 | 未超过 8 个模块，无需分批 |
+| 依赖方向 | **M-B 依赖 M-A**（网页的清空按钮调用 `ctx.retention`），M-A 必须先完成 |
+
+阶段 0 的共享文件由架构师完成，不计入派发。
+
+## 2. 阶段 0：共享文件处置
+
+| 文件 | 处置 | 内容 |
+|---|---|---|
+| `src/notify_hub/config.py` | 架构师，**阶段 0** | 新增 `RetentionSettings`（`days: int = 30`）与 `Settings.retention`；解析 `retention.days`（缺省 30） |
+| `src/notify_hub/context.py` | 架构师，**M-A 实现落地之后** | `AppContext` 增 `retention: RetentionService`；`_assemble` 构造它并传给 `ReminderScheduler` |
+| `tests/conftest.py` | 架构师，阶段 0 | `make_context` 需适配 `ReminderScheduler` 新增的构造参数 |
+| `config.example.yaml` | 架构师 | 新增 `retention` 段并注释 |
+| `docs/configuration.md`、`docs/deployment.md` | 架构师 | 保留期参数、两个窗口的区别、备份建议、回滚 |
+| `openspec/**` | 架构师 | 本变更全部产物 |
+
+**`context.py` 为什么延后**：它要 `from notify_hub.services.retention import RetentionService`，
+而该模块在 M-A 实现之前不存在。提前改会让所有 `import notify_hub.context` 的测试在收集期失败
+（`add-notify-hub` 的 D 系列踩过这个坑）。装配行在 M-A 落地后补，属预期，不是遗漏。
+
+**因此执行顺序是串行的**：M-A 测试 → M-A 实现 → 架构师补 `context.py` → M-B 测试 → M-B 实现。
+
+## 3. 数据回收规则（两个模块共同遵守）
+
+**删除顺序不可颠倒**，因为 `db.py` 开启了 `PRAGMA foreign_keys=ON`：
+
+1. 删已完成待办 → 先删其 `todo_events`，并把引用它的 `deliveries.todo_id` **置 NULL（保留行）**
+2. 删消息 → 先删 `deliveries` 中 `message_id` 指向它的行，再删消息
+3. 删过期 `digest_runs`
+
+**两条硬约束（不是可配置项）**：
+
+- `todos.status = pending` 的待办**永不删除**
+- 被**任何** todo 引用的 `messages` 行**永不删除**（`todos.message_id` 是外键）
+
+**时间基准**：一律先把时间戳换算到本地时区（`settings.reminders.zone`，即 `Asia/Shanghai`）
+再取日期。待办用 `completed_at`，消息用 `received_at`，汇总用 `digest_runs.local_date`。
+
+**禁止**在回收路径里调用 `datetime.now()`——必须用注入的 `Clock`（跨模块不变量）。
+
+## 4. 模块 M-A：数据保留与自动回收
+
+**文件边界**
+
+- **实现路径**（`subagent_dev`）：`src/notify_hub/services/retention.py`（**新建**）、
+  `src/notify_hub/services/scheduler.py`
+- **测试路径**（`subagent_verify`）：`tests/test_retention.py`（**新建**）
+
+`config.py`、`context.py`、`models.py`、`db.py` 归架构师或既有模块，**两者都不得修改**。
+
+### 4.1 功能
+
+按保留期回收历史数据，使长期运行后的存储占用有界。
+
+**做**：计算截止日、按固定顺序删四类记录、返回计数、在每日结算点被触发、记录一条汇总日志。
+
+**不做**：不新增数据表、不改表结构、不做按条数保留、不做归档导出、不删除 pending 待办、
+不删除被待办引用的消息、**不在服务启动时回收**（D3 的理由）、不直接记录逐行日志。
+
+### 4.2 接口
+
+```python
+@dataclass(frozen=True)
+class PurgeReport:
+    todos: int = 0
+    todo_events: int = 0
+    deliveries_unlinked: int = 0   # deliveries.todo_id 被置 NULL 的**行数**（不是删除数）
+    deliveries: int = 0            # 被**删除**的 deliveries 行数
+    messages: int = 0
+    digest_runs: int = 0
+
+    @property
+    def deleted_total(self) -> int:
+        """被删除的行数合计（不含 ``deliveries_unlinked``，那些行还在）。"""
+
+    @property
+    def is_empty(self) -> bool:
+        """是否什么都没删、也没解绑。"""
+```
+
+```python
+class RetentionService:
+    def __init__(
+        self,
+        db: Database,
+        clock: Clock,
+        *,
+        days: int = 30,
+        zone: ZoneInfo,
+        logger: logging.Logger | None = None,
+    ) -> None: ...
+
+    @property
+    def enabled(self) -> bool: ...
+
+    def cutoff_date(self, now: datetime | None = None) -> date: ...
+
+    def purge_expired(self, now: datetime | None = None) -> PurgeReport: ...
+
+    def purge_completed_older_than(self, local_date: date) -> PurgeReport: ...
+```
+
+- `enabled`：`days > 0`。
+- `cutoff_date(now=None)`：返回 `(now or clock.now()).astimezone(zone).date() - timedelta(days=days)`。
+  `now` 为 naive 时**必须**先经 `clock.as_utc()` 归一化（SQLite 读出的时间是裸的）。
+- `purge_completed_older_than(local_date)`：删除 `status=done` 且 `completed_at` 的**本地日期
+  `< local_date`** 的待办；删它们的 `todo_events`；把引用它们的 `deliveries.todo_id` 置 NULL。
+  **不动 messages 与 digest_runs。** `completed_at` 为 NULL 的 done 待办**不删**（数据异常，保守处理）。
+- `purge_expired(now=None)`：`enabled` 为假时**立即返回全 0 的报告且不执行任何查询级删除**；
+  否则按 §3 的顺序执行三步，cutoff 取 `cutoff_date(now)`。
+- **不变量**：两个方法都是**幂等**的——紧接着再跑一次，报告的 `deleted_total == 0`
+  且 `deliveries_unlinked == 0`。
+- **错误契约**：不吞异常，由调用方隔离（调度器已整体兜异常）。
+- 日志：`deleted_total > 0` 或 `deliveries_unlinked > 0` 时打**一条** INFO，含各字段计数；
+  什么都没发生时**不打日志**。
+
+### 4.3 内部实现
+
+- 依赖：`notify_hub.db.Database`、`notify_hub.clock`（`Clock`/`as_utc`）、`notify_hub.models`、
+  标准库 `dataclasses`/`datetime`/`zoneinfo`/`logging`。**禁止引入新依赖。**
+- 复用既有模式：`src/notify_hub/services/todos.py` 的 `with self._db.session() as session:` 写法、
+  中文 docstring、`__all__`。
+- 删除用 SQLAlchemy `delete()` 或 `session.exec(select(...))` + `session.delete(...)` 均可；
+  但**解绑**（`deliveries.todo_id = NULL`）必须真的写 NULL，而不是删除行。
+- 消息是否可删的判定：`NOT EXISTS (SELECT 1 FROM todos WHERE todos.message_id = messages.id)`。
+  用 SQL 子查询一次算完，**不要**在 Python 里逐行判断（避免 N+1 与竞态窗口）。
+- 每条 `session` 内完成一个步骤；三步之间各自独立提交，避免一个大事务长时间持锁。
+
+### 4.4 scheduler.py 的改动（同一模块内）
+
+- `ReminderScheduler.__init__` 新增**关键字**参数 `retention: RetentionService`。
+- 在 `_run_once` 里，**当天结算完成之后**调用 `self._retention.purge_expired()`：
+  - 空待办分支的 `self._digest.record(today, todo_count=0, delivered=True)` **之后**
+  - 成功分支的 `self._digest.record(...delivered=True)` **之后**
+  - **失败（未定案）分支不得调用**
+- 该调用必须包在自己的 `try/except Exception` 里，异常时打一条 WARNING 并**继续**——
+  回收失败绝不能影响汇总本身的返回语义，也不能让调度线程退出。
+- **不得**改变 `run_once` 既有的返回值语义与「当天 settled 则早退」的行为。
+
+### 4.5 验证方法
+
+测试文件 `tests/test_retention.py`；命令 `.venv/bin/python -m pytest tests/test_retention.py -q`。
+
+**单元测试**
+
+| 验收点 | 可观察结果 |
+|---|---|
+| `enabled` | `days=0` → `False`；`days=30` → `True` |
+| `cutoff_date` | `ManualClock` 推进到某本地日期，`days=30` 时为 `今天-30`；`days=0` 时为 `今天` |
+| `cutoff_date` 对 naive 时间 | 传入 naive `now` 不抛错，按 UTC 归一化 |
+| `PurgeReport.deleted_total` | 各字段求和，**不含** `deliveries_unlinked` |
+| `is_empty` | 全 0 时为 `True` |
+
+**行为测试（每条都要先造好数据，再断言删没删）**
+
+| 验收点 | 可观察结果 |
+|---|---|
+| **pending 待办永不删** | 造一条 100 天前的 pending 待办 → 回收后仍在，且其消息仍在 |
+| **被待办引用的消息永不删** | 同上：该消息的 `deliveries` 也一行不少 |
+| 过期的已完成待办被删 | 100 天前完成 → todo 行与它的 `todo_events` 都没了 |
+| 投递记录**解绑而非删除** | 引用该待办的 `deliveries` **行仍在**、`todo_id` 为 `None`、`message_id` 不变 |
+| 保留期内的记录不动 | 完成于 1 天前（`days=30`）→ todo 与消息都还在 |
+| 无待办引用的旧消息被删 | 100 天前收到、没有任何 todo 指向它 → 消息与其 `deliveries` 都被删 |
+| 近期消息不动 | 1 天前收到的消息仍在 |
+| `digest_runs` 按 `local_date` 删 | 100 天前的记录没了，今天的不动 |
+| `days=0` 关闭 | 什么都不删，返回全 0 |
+| **幂等** | 连续跑两次：第二次 `deleted_total == 0` 且 `deliveries_unlinked == 0` |
+| **无悬空引用** | 回收后查库：不存在 `deliveries.todo_id` / `todo_events.todo_id` 指向已不存在的 todo |
+| `completed_at` 为 NULL 的 done 待办 | 不删（保守处理） |
+
+**调度器集成测试（同一文件内，用 `ManualClock` 推进，禁止真实等待）**
+
+| 验收点 | 可观察结果 |
+|---|---|
+| 结算后触发 | 推进时钟跨过触发时刻 → 汇总结算 → 过期数据被删 |
+| 未到时刻不触发 | 时钟早于触发时刻 → 数据一条不少 |
+| 当天已定案不重复触发 | 再跑一轮 → 不再回收（幂等，且不产生第二条日志） |
+| 汇总失败时不触发 | 投递失败（未定案）→ 不回收 |
+| 回收抛异常不影响汇总 | 注入一个会抛异常的假 retention → `run_once` 仍正常返回、调度器不崩 |
+
+**必须覆盖的异常场景（至少 2 条）**：① 回收过程中抛异常——不得让 `run_once` 抛出，
+也不得改变其返回值；② `days=0` 时调度器照样结算，但一条数据都不删。
+
+**完成后必须成立**：
+
+```bash
+.venv/bin/python -m pytest tests/test_retention.py -q
+.venv/bin/python -m pytest -q          # 全量仍全绿（现为 397 收集）
+```
+
+## 5. 模块 M-B：待办网页改版
+
+**文件边界**
+
+- **实现路径**（`subagent_dev`）：`src/notify_hub/web/routes.py`、
+  `src/notify_hub/web/templates/*.html`
+- **测试路径**（`subagent_verify`）：`tests/test_web_recent_completed.py`（**新建**）
+
+`tests/test_web.py`（既有，635 行）与 `tests/test_docs_contract.py` **都不得修改**。
+
+### 5.1 功能
+
+主列表页新增「最近完成」栏目与「清空已完成」按钮，并整体美化。
+
+**做**：今天的已完成待办单独成块；一键清空更早的已完成；纯 CSS 美化。
+
+**不做**：不新增页面路由、不改既有筛选的语义、不引入任何外部资源或 JS 库、
+不让网页直接访问数据库、**不加新的写操作**（除清空按钮外）。
+
+### 5.2 接口
+
+**路由改动（`web/routes.py`）**
+
+- `todos_list` 的模板上下文**新增** `recent_completed`：
+  `tuple[TodoView, ...]`，即「`completed_at` 的**本地日期等于今天**」的已完成待办。
+  - 「今天」取自 **`ctx.clock.now()`** 换算到 `ctx.settings.reminders.zone` 后的日期
+  - 排序：`completed_at` **降序**（最近完成的在前）
+  - 既有上下文键（`todos`、`status`）**不得改名或删除**
+- **新增路由** `POST /todos/purge-completed`：
+  - 调用 `ctx.retention.purge_completed_older_than(今天)`（今天 = 同上换算所得）
+  - 返回 `303` 重定向到 `/todos`
+  - **不接任何参数、不接受任何用户输入**（避免把 cutoff 变成可注入的量）
+- **栏目始终显示**：`status=pending|done|all` 三种视图下都渲染
+  （它回答的是「今天完成了什么」，与主表筛选无关）
+
+**模板改动**
+
+- `todos_list.html`：新增「最近完成」区块（标题、完成时间、处理耗时 `format_duration`、
+  标题链接到详情）。空时显示占位文案「今天还没有完成的待办」。
+  区块内放「清空已完成」表单：`method="post"`、`action="/todos/purge-completed"`、
+  `onsubmit="return confirm('确定清空今天之前完成的待办吗？此操作不可撤销。')"`。
+- `base.html`：重写内联 `<style>`（见 §5.3）。
+- **主表结构保持不变**：七列、`colspan="7"` 的空态行、`?status=` 三个筛选链接都不得改动
+  ——既有 `tests/test_web.py` 依赖它们。
+
+### 5.3 内部实现
+
+- **零外部资源**：不得新增 `<link rel=...>`、`@import`、webfont、`<script src>`；
+  不得引入任何 CSS/JS 框架。全部样式写在 `base.html` 的 `<style>` 内。
+- 手机优先：保留 `viewport` meta；正文最大宽度受限并居中；表格在窄屏**不得撑破页面**
+  （用 `overflow-x:auto` 包裹或等价方案）；触控目标（按钮）高度不小于约 2rem。
+- 视觉：系统字体栈；浅色背景 + 卡片式分区；主色建议用现有 `theme-color` 同族色；
+  待完成/已完成用不同色的徽章；表头弱化；行悬停高亮。
+- 可访问性：语义结构（`<table>/<thead>/<tbody>/<nav>/<main>`）保持；
+  颜色对比不过低；`confirm` 用内联属性，不新增脚本文件。
+- Jinja2 自动转义是硬约束（消息正文可能含 HTML），**不得**使用 `|safe` 或任何绕过转义的写法。
+- 复用既有过滤器：`format_time` / `status_label` / `event_kind_label` / `format_duration`，
+  **不得**在模板里自造时间格式。
+
+### 5.4 验证方法
+
+测试文件 `tests/test_web_recent_completed.py`；
+命令 `.venv/bin/python -m pytest tests/test_web_recent_completed.py -q`。
+
+装配用 `create_web_app(ctx)`（既有，**不启动后台线程**）+ `fastapi.testclient.TestClient`；
+`ctx` 用 conftest 的 `make_context` + `manual_clock` 造，时间通过 `ManualClock` 控制。
+
+| 验收点 | 可观察结果 |
+|---|---|
+| 今天完成的进栏目 | 用 `ManualClock` 把「今天」定住，造一条今天完成的待办 → 页面出现它 |
+| 昨天完成的不进栏目 | 造一条昨天完成的 → 栏目里**没有**它（但主表 `status=all` 时仍有） |
+| 栏目按完成时间降序 | 造两条今天完成的 → 页面中靠前的那条完成时间更晚 |
+| 栏目在三种筛选下都显示 | `?status=pending` / `done` / `all` → 三处都能看到栏目标题 |
+| 栏目为空时的占位 | 没有今天完成的待办 → 出现占位文案 |
+| 清空按钮存在且带确认 | 页面含 `action="/todos/purge-completed"` 的 form，且含 `onsubmit=` 与 `confirm(` |
+| **清空只删更早的** | 造「今天完成」与「昨天完成」各一条 → POST 后今天那条还在、昨天那条没了 |
+| 清空后重定向 | POST → `303`，`Location` 为 `/todos` |
+| 清空不碰 pending | 造一条很旧的 pending 待办 → POST 后仍在 |
+| 清空后消息未被删 | 被清空待办的消息仍在库里 |
+| 页面自包含 | 渲染出的 HTML 里**不含** `src="http` / `href="http` / `@import` |
+| 既有过滤器仍生效 | 页面里的时间形如 `YYYY-MM-DD HH:MM:SS`（UTC、去微秒） |
+
+**必须覆盖的异常场景（至少 2 条）**：① 库里没有任何已完成待办时访问列表页——栏目显示占位、
+主表显示空态，**不得 500**；② `?status=done` 且今天无完成项——栏目占位与主表空态同时出现，
+两处文案不串。
+
+**完成后必须成立**：
+
+```bash
+.venv/bin/python -m pytest tests/test_web_recent_completed.py -q
+.venv/bin/python -m pytest tests/test_web.py -q          # 既有 635 行必须仍全绿
+.venv/bin/python -m pytest -q                            # 全量
+```
+
+## 6. 集成测试范围（阶段 D）
+
+作用域 2，`tests/test_integration_retention_web.py`，**不打桩**：
+
+- **调度器 -> 真实 DB -> 网页**：用 `ManualClock` 推进跨过触发时刻，让真实调度器完成结算并
+  触发回收；随后用真实 `create_web_app(ctx)` 取页面，断言被回收的记录确实不再出现。
+- **回收 -> 投递记录账本完整性**：删除一条已完成待办后，其消息详情页的「投递记录」
+  **行数不变**（`todo_id` 被解绑但行还在）——这是 D4 的核心承诺。
+- **pending 保护**：跨越保留期后，pending 待办与其消息在网页与库里都仍在。
+- **幂等**：连续两次结算周期之间重复触发回收，第二次报告为空。
+
+## 7. 门禁
+
+1. M-A 测试（红）→ M-A 实现（绿）→ 架构师补 `context.py`
+2. M-B 测试（红）→ M-B 实现（绿）→ 全量绿
+3. 阶段 D 集成测试
+4. 阶段 E `subagent_review`（对照 `design.md` / `proposal.md` 查设计符合性）
+5. security-scan → commit → push
