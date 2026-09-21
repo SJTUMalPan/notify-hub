@@ -30,6 +30,14 @@ M10 新增 ``feishu`` 注册项时，配置文档一个字都没提飞书，属�
 的真实缺口；本条把这类缺口变成 CI 红灯，且**只判「类型名是否出现在文档全文」**，
 不要求章节标题或句式，以免过度约束文档写法。
 
+**另有第 9 条（``add-retention-and-web-ui`` 增量，P1 的永久守卫）**：
+``test_retention_docs_contract`` —— ``config.example.yaml`` 的 ``retention`` 段、
+``docs/configuration.md`` 的语义说明（保留期、``0`` 表示关闭、两条硬约束）与
+``docs/deployment.md`` 的运维警示（真删数据、启用前先备份、``days=0`` 回滚）必须同时存在，
+且**跨文件一致**：示例配置里 ``retention.days`` 的取值必须等于配置文档写明的缺省值。
+P1 的根因是「文档缺失时没有任何测试会红」——保留期会真的删数据，却可以整个功能上线而
+文档一字不提；本条把这类缺口变成 CI 红灯，判据只看必需的说法是否出现，不冻结句式。
+
 **红是预期结果**：``README.md`` 与 ``docs/`` 下的四份文档当前都不存在（它们是 M9 的
 实现路径，由开发子代理负责）。因此提取逻辑在文件缺失时给出的是**带期望路径的、可读的
 失败信息**，而不是含糊的 ``FileNotFoundError`` 栈——这样「红」的原因可以被一眼判定为
@@ -862,3 +870,136 @@ def test_readme_doc_links_resolve() -> None:
         if not candidate.exists():
             missing.append(f"{link} -> {candidate}")
     assert not missing, f"{README_PATH} 中的文档链接指向不存在的文件：{missing}"
+
+
+# --------------------------------------------------------------------------- #
+# 第 9 条（add-retention-and-web-ui 增量）：保留期的文档契约（P1 的永久守卫）
+# --------------------------------------------------------------------------- #
+def _normalized_doc(text: str) -> str:
+    """按行去掉 Markdown 强调符、行内代码反引号与空白后的文本。
+
+    判据是对「句子」做措辞容忍的匹配，所以先去掉行内噪声；刻意**不跨行拼接**——
+    否则两行不相干的文字可能被凑成一句假命中。
+    """
+    return "\n".join(re.sub(r"[*`\s]+", "", line) for line in text.splitlines())
+
+
+#: 两条硬约束的措辞容忍集：主体 × 否定式的任一组合出现即算「写明」。
+_HARD_CONSTRAINT_SUBJECTS = (
+    ("未完成的待办永不回收", ("未完成的待办", "pending待办")),
+    ("被待办引用的消息永不回收", ("被任何待办引用的消息", "被待办引用的消息")),
+)
+_HARD_CONSTRAINT_NEGATIONS = ("永不回收", "永不被回收")
+
+#: 配置文档里写有「保留天数缺省值」的小节标题。
+_RETENTION_DAYS_HEADING = "### retention.days"
+
+
+def _missing_hard_constraints(normalized: str) -> list[str]:
+    """两条硬约束里**没有**被写明的那些（空列表＝两条都写了）。"""
+    return [
+        label
+        for label, subjects in _HARD_CONSTRAINT_SUBJECTS
+        if not any(
+            f"{subject}{negation}" in normalized
+            for subject in subjects
+            for negation in _HARD_CONSTRAINT_NEGATIONS
+        )
+    ]
+
+
+def _documented_retention_default(text: str) -> int:
+    """``docs/configuration.md`` 的 ``### retention.days`` 小节里写明的缺省值。
+
+    找不到小节或找不到「缺省 N」时给出可读的失败信息（与 ``_read_text`` 的风格一致），
+    而不是让 ``StopIteration``/``AttributeError`` 这类栈冒出来。
+    """
+    lines = text.splitlines()
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if line.strip() == _RETENTION_DAYS_HEADING
+    ]
+    assert starts, (
+        f"{CONFIG_DOC_PATH} 中找不到小节标题 {_RETENTION_DAYS_HEADING!r}，"
+        f"无法核对保留期缺省值；现有小节标题：{_headings(text)}"
+    )
+    body: list[str] = []
+    for line in lines[starts[0] + 1 :]:
+        if re.match(r"^#{2,3}\s", line):
+            break
+        body.append(line)
+    match = re.search(r"缺省\s*[`\"']?(\d+)", "\n".join(body))
+    assert match, (
+        f"{CONFIG_DOC_PATH} 的 {_RETENTION_DAYS_HEADING} 小节里没有写明缺省值"
+        f"（应形如「缺省 `30`」）；该小节正文：{body!r}"
+    )
+    return int(match.group(1))
+
+
+def test_retention_docs_contract() -> None:
+    """**契约**：保留期必须同时被示例配置、配置文档与部署文档覆盖，且三处说法互相一致。
+
+    这一条是 P1 的永久守卫。P1 的根因不是「文档写错」，而是「**文档缺失时没有任何测试
+    会红**」：``retention`` 会真的删数据，却可以整个功能上线而文档一字不提。本条把
+    ``config.example.yaml`` 的 ``retention`` 段、``docs/configuration.md`` 的语义说明与
+    ``docs/deployment.md`` 的运维警示绑成一个契约，并做**跨文件一致性**检查——
+    任何一边改了而另一边没跟上，CI 直接红。
+
+    判据只看「必需的说法是否出现」与「两处的缺省值是否相同」，不冻结句式与章节顺序，
+    以免把文档的排版选择变成失败原因。
+    """
+    raw_config = _read_text(CONFIG_EXAMPLE_PATH, what="config.example.yaml（只读引用）")
+    config_doc = _read_text(CONFIG_DOC_PATH, what="配置说明文档")
+    deploy_doc = _read_text(DEPLOYMENT_DOC_PATH, what="部署说明")
+
+    # ---- 1. 示例配置必须给出 retention 段与 days ----------------------------- #
+    data = yaml.safe_load(raw_config)
+    assert isinstance(data, dict), f"{CONFIG_EXAMPLE_PATH} 的顶层必须是映射"
+    retention = data.get("retention")
+    assert isinstance(retention, dict), (
+        f"{CONFIG_EXAMPLE_PATH} 必须含 `retention` 段：保留期是本服务唯一会主动删除数据的地方，"
+        f"示例配置漏掉它，用户就没有任何地方能看到「服务会删数据」；"
+        f"实际的顶层键：{sorted(str(key) for key in data)}"
+    )
+    assert "days" in retention, (
+        f"{CONFIG_EXAMPLE_PATH} 的 `retention` 段必须含 `days`，"
+        f"实际的键：{sorted(str(key) for key in retention)}"
+    )
+
+    # ---- 2. 配置文档：保留期 + 「0 表示关闭」+ 两条硬约束 --------------------- #
+    config_normalized = _normalized_doc(config_doc)
+    assert ("保留期" in config_normalized) or ("保留天数" in config_normalized), (
+        f"{CONFIG_DOC_PATH} 必须写明保留期（应出现「保留期」或「保留天数」）"
+    )
+    assert re.search(r"`0`\s*表示[^\n]*关闭", config_doc), (
+        f"{CONFIG_DOC_PATH} 必须写明 **`0` 表示关闭回收**；不写清楚，用户会把它读成"
+        f"「保留 0 天＝立刻清空数据」"
+    )
+    missing_constraints = _missing_hard_constraints(config_normalized)
+    assert not missing_constraints, (
+        f"{CONFIG_DOC_PATH} 必须写明保留期的两条硬约束（不可配置），未写明：{missing_constraints}；"
+        f"它们是「回收会删数据」这一承诺的安全边界，缺一条都会让用户误判风险"
+    )
+
+    # ---- 3. 部署文档：真删数据 + 启用前先备份 + days=0 回滚 ------------------- #
+    deploy_normalized = _normalized_doc(deploy_doc)
+    assert "真的删除" in deploy_normalized, (
+        f"{DEPLOYMENT_DOC_PATH} 必须说明回收会**真的删除**数据（删掉即无法恢复），"
+        f"不得只描述成「清理」「归档」或「迁移」"
+    )
+    assert "务必先备份" in deploy_normalized, (
+        f"{DEPLOYMENT_DOC_PATH} 必须写明「首次启用 retention（或把 days 调小）之前务必先备份」"
+        f"的运维警示"
+    )
+    assert re.search(r"回滚[^\n]{0,40}retention\.days[^\n]{0,20}0", deploy_normalized), (
+        f"{DEPLOYMENT_DOC_PATH} 必须写明回滚方式：把 `retention.days` 设为 `0` 即停止回收"
+    )
+
+    # ---- 4. 跨文件一致性：示例取值 ＝ 文档缺省值（双向检查） ----------------- #
+    documented_default = _documented_retention_default(config_doc)
+    assert retention["days"] == documented_default, (
+        f"跨文件不一致：{CONFIG_EXAMPLE_PATH} 的 `retention.days` = {retention['days']!r}，"
+        f"而 {CONFIG_DOC_PATH} 的 {_RETENTION_DAYS_HEADING} 小节写明的缺省值是 "
+        f"{documented_default!r}；两处必须一起改（任一边单独改动都会红）"
+    )

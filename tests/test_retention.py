@@ -378,6 +378,51 @@ def test_cutoff_date_huge_days_does_not_raise(db, manual_clock, tmp_settings):
     assert service.cutoff_date() == date.min
 
 
+def test_huge_days_purge_expired_does_not_raise_and_deletes_nothing(
+    db, manual_clock, tmp_settings
+):
+    """§4.2「``days`` 极大时不得抛异常＝不回收任何东西」的**端到端**形态。
+
+    上一条只验到 ``cutoff_date()`` 返回 ``date.min``；再往下走一步才是真正的契约：
+    ``purge_expired()`` 必须同样不抛异常、返回空报告、且一条记录都不删。
+    「不回收任何东西」是语义，不是「结算时抛异常再打一条 WARNING」——后者会让
+    每一次结算都产生排查噪音。
+    """
+    zone = tmp_settings.reminders.zone
+    clock = ManualClock(T0)
+    old = T0 - timedelta(days=100)
+    message_id = _make_message(db, received_at=old)
+    todo_id = _make_todo(db, message_id, status=TodoStatus.DONE.value, completed_at=old)
+    _make_todo_event(db, todo_id, occurred_at=old, kind=TodoEventKind.COMPLETED.value)
+    _make_delivery(db, attempted_at=old, message_id=message_id, todo_id=todo_id)
+    _make_digest_run(db, local_date=_local_date(old, zone), checked_at=old)
+    from notify_hub.models import DeliveryRecord, DigestRun, Message, Todo, TodoEvent
+
+    tables = {
+        "todos": Todo,
+        "todo_events": TodoEvent,
+        "deliveries": DeliveryRecord,
+        "messages": Message,
+        "digest_runs": DigestRun,
+    }
+    before = {name: _count(db, model) for name, model in tables.items()}
+    assert all(count > 0 for count in before.values()), f"夹具没造出数据：{before}"
+
+    service = _service(db, clock, days=10**9, zone=zone)
+    assert service.cutoff_date() == date.min, "前置：极大 days 下 cutoff 应为 date.min"
+
+    report = service.purge_expired()
+
+    assert report.is_empty is True, (
+        f"极大 days 语义上等价于「没有任何记录早于 cutoff」，报告必须为空，实际 {report!r}"
+    )
+    assert report.deleted_total == 0
+    assert {name: _count(db, model) for name, model in tables.items()} == before, (
+        f"极大 days 下一条记录都不该被删，回收前 {before}，"
+        f"回收后 {({name: _count(db, model) for name, model in tables.items()})}"
+    )
+
+
 @pytest.mark.parametrize(
     "fields, expected",
     [
