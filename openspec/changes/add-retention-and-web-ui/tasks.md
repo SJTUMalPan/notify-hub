@@ -10,7 +10,8 @@
 - [ ] 0.2 `config.py`：解析 `retention.days`；缺省 30；非整数或负数报 `ConfigurationError`
 - [ ] 0.3 手工验证 0.1–0.2 不破坏现有 397 个测试
 - [ ] 0.4 **M-A 落地后**：`context.py` 装配 `RetentionService`，加进 `AppContext`，传给 `ReminderScheduler`
-- [ ] 0.5 `tests/conftest.py`：`make_context` 适配调度器新增的构造参数
+- [x] 0.5 `tests/conftest.py`：**无需改动**——调度器的 `retention` 参数可空（架构 §4.4），
+      `make_context` 保持原样，因此阶段 A 不会出现「所有测试在收集期失败」的破坏窗口
 - [ ] 0.6 `config.example.yaml` 增 `retention` 段并注释
 - [ ] 0.7 `docs/configuration.md`：保留期参数；`docs/deployment.md`：两个窗口的区别、备份建议、回滚
 

@@ -76,6 +76,22 @@ class ReminderSettings:
 
 
 @dataclass(frozen=True)
+class RetentionSettings:
+    """数据保留参数（add-retention-and-web-ui）。
+
+    ``days`` 的语义是「**至少**保留这么多天」：回收的是本地日期**早于**
+    ``今天 - days`` 的记录。``0`` 表示**关闭回收**。
+    """
+
+    days: int = 30
+
+    @property
+    def enabled(self) -> bool:
+        """仅在 ``days > 0`` 时真正回收。"""
+        return self.days > 0
+
+
+@dataclass(frozen=True)
 class Settings:
     """服务运行期配置。路径类字段与数值类字段永不为 None。
 
@@ -93,6 +109,7 @@ class Settings:
     reminders: ReminderSettings = ReminderSettings()
     log_level: str = "INFO"
     auth_token: str | None = None
+    retention: RetentionSettings = RetentionSettings()
 
 
 # --------------------------------------------------------------------------- #
@@ -330,6 +347,7 @@ def load_settings(
     reminders = _parse_reminders(data.get("reminders"))
 
     auth_token = _parse_auth_token(server)
+    retention = _parse_retention(data.get("retention"))
 
     return Settings(
         db_path=db_path,
@@ -345,6 +363,7 @@ def load_settings(
         reminders=reminders,
         log_level=str(server.get("log_level", "INFO")),
         auth_token=auth_token,
+        retention=retention,
     )
 
 
@@ -371,6 +390,35 @@ def _parse_auth_token(server: Mapping[str, Any]) -> str | None:
             "server.auth_token 不能是空白字符串（缺省或显式 null 表示不启用访问鉴权）"
         )
     return token
+
+
+def _parse_retention(section: Any) -> RetentionSettings:
+    """解析 ``retention`` 段（add-retention-and-web-ui）。
+
+    契约（架构师冻结，见该变更 ``architecture.md`` 第 2 节）：
+
+    - 段缺失、或段内无 ``days`` 键 → 缺省 30 天
+    - ``days`` **必须是真正的整数**：``bool``、``float``、字符串一律报错。
+      这里刻意**不**复用 ``_as_int``——它会 ``int(30.7) -> 30`` 静默截断，而把保留期
+      悄悄改短正处在「静默吞掉一个和删数据有关的参数」这条线上，不能容忍
+    - ``days < 0`` 报错；``days == 0`` 合法，表示关闭回收
+    """
+    if section is None:
+        return RetentionSettings()
+
+    mapping = _as_mapping(section, "retention")
+    raw = mapping.get("days", 30)
+
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ConfigurationError(
+            f"retention.days 必须是整数，实际为 {raw!r}"
+            "（0 表示关闭回收）"
+        )
+    if raw < 0:
+        raise ConfigurationError(
+            f"retention.days 必须 >= 0（0 表示关闭回收），实际为 {raw}"
+        )
+    return RetentionSettings(days=raw)
 
 
 def credential_values(settings: Settings) -> tuple[str, ...]:

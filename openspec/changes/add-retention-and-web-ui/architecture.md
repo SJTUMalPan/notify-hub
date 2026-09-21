@@ -18,9 +18,10 @@
 
 | 文件 | 处置 | 内容 |
 |---|---|---|
-| `src/notify_hub/config.py` | 架构师，**阶段 0** | 新增 `RetentionSettings`（`days: int = 30`）与 `Settings.retention`；解析 `retention.days`（缺省 30） |
+| `src/notify_hub/config.py` | 架构师，**阶段 0** | 新增 `RetentionSettings`（`days: int = 30`，含 `enabled` 属性）与 `Settings.retention` |
+| `src/notify_hub/config.py` 的 `_parse_retention` | 架构师，**阶段 0** | `retention` 段的**冻结语义**：段缺失或段内无 `days` → 30；`days` **必须是真正的整数**（`bool` / `float` / 字符串一律 `ConfigurationError`——**刻意不复用 `_as_int`**，因为它会 `int(30.7) -> 30` 静默截断）；`days < 0` → `ConfigurationError`；`days == 0` 合法＝关闭回收 |
 | `src/notify_hub/context.py` | 架构师，**M-A 实现落地之后** | `AppContext` 增 `retention: RetentionService`；`_assemble` 构造它并传给 `ReminderScheduler` |
-| `tests/conftest.py` | 架构师，阶段 0 | `make_context` 需适配 `ReminderScheduler` 新增的构造参数 |
+| `tests/conftest.py` | **不改** | 调度器的 `retention` 参数可空（§4.4），`make_context` 无需传它。**这是刻意的**——改动可加，不产生破坏窗口 |
 | `config.example.yaml` | 架构师 | 新增 `retention` 段并注释 |
 | `docs/configuration.md`、`docs/deployment.md` | 架构师 | 保留期参数、两个窗口的区别、备份建议、回滚 |
 | `openspec/**` | 架构师 | 本变更全部产物 |
@@ -114,6 +115,9 @@ class RetentionService:
 - `enabled`：`days > 0`。
 - `cutoff_date(now=None)`：返回 `(now or clock.now()).astimezone(zone).date() - timedelta(days=days)`。
   `now` 为 naive 时**必须**先经 `clock.as_utc()` 归一化（SQLite 读出的时间是裸的）。
+  **`days` 极大时不得抛异常**：减法溢出（`OverflowError`）时返回 `date.min`，
+  语义上等价于「没有任何记录早于它」＝不回收任何东西。配置层不设上界，
+  所以这一层必须兜住。
 - `purge_completed_older_than(local_date)`：删除 `status=done` 且 `completed_at` 的**本地日期
   `< local_date`** 的待办；删它们的 `todo_events`；把引用它们的 `deliveries.todo_id` 置 NULL。
   **不动 messages 与 digest_runs。** `completed_at` 为 NULL 的 done 待办**不删**（数据异常，保守处理）。
@@ -139,7 +143,13 @@ class RetentionService:
 
 ### 4.4 scheduler.py 的改动（同一模块内）
 
-- `ReminderScheduler.__init__` 新增**关键字**参数 `retention: RetentionService`。
+- `ReminderScheduler.__init__` 新增**关键字**参数 `retention: RetentionService | None = None`。
+  - **为什么可空**：`tests/conftest.py` 的 `make_context` 会构造调度器；若该参数必填，
+    阶段 A（`retention.py` 尚不存在）会让**所有**用到 `ctx` 夹具的测试在收集期失败——
+    前两次变更都踩过这个坑。可空是刻意换取的「改动可加、不破坏既有 397 条测试」。
+  - 为 `None` 时**跳过回收**，其余行为一字不变（不得改变返回值、不得跳过结算）。
+  - **这个默认值的代价**：接线漏传会**静默关闭回收**。该风险由阶段 D 的集成测试兜底——
+    它必须断言**生产装配 `build_context`** 造出来的调度器真的会回收。
 - 在 `_run_once` 里，**当天结算完成之后**调用 `self._retention.purge_expired()`：
   - 空待办分支的 `self._digest.record(today, todo_count=0, delivered=True)` **之后**
   - 成功分支的 `self._digest.record(...delivered=True)` **之后**
@@ -161,6 +171,23 @@ class RetentionService:
 | `cutoff_date` 对 naive 时间 | 传入 naive `now` 不抛错，按 UTC 归一化 |
 | `PurgeReport.deleted_total` | 各字段求和，**不含** `deliveries_unlinked` |
 | `is_empty` | 全 0 时为 `True` |
+| `cutoff_date` 极大 `days` | `days=10**9` 时不抛异常（返回 `date.min`） |
+
+**单元测试（阶段 0 共享文件组）**——覆盖架构师在阶段 0 改的 `config.py`，语义以 §2 为准：
+
+| 验收点 | 可观察结果 |
+|---|---|
+| `retention` 段缺失 | `settings.retention.days == 30` |
+| `retention` 为空段 | 同上 |
+| `days: 0` | `days == 0` 且 `enabled is False` |
+| `days: 90` | `days == 90` 且 `enabled is True` |
+| `days: -1` | `load_settings` 抛 `ConfigurationError` |
+| `days: 30.7` | 抛 `ConfigurationError`（**不得**截断成 30） |
+| `days: "30"` | 抛 `ConfigurationError` |
+| `days: true` | 抛 `ConfigurationError`（`bool` 不是整数） |
+| `RetentionSettings()` 默认 | `days == 30`、`enabled is True` |
+
+**这组若失败，是架构师实现的问题**：不要改期望值去迁就代码，写进 `SPEC-GAPS` 报告。
 
 **行为测试（每条都要先造好数据，再断言删没删）**
 
