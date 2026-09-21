@@ -8,6 +8,9 @@ venv/
 .ruff_cache/
 .mypy_cache/
 
+# Node：dsh-plugin/ 的依赖目录（插件本身零依赖，本地装过就会有）
+node_modules/
+
 # 本地数据与运行时产物
 *.db
 *.sqlite3
