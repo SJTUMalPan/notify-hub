@@ -475,8 +475,9 @@ def test_cookie_auth_reaches_real_routes_and_really_writes_the_db(tmp_path, manu
         assert ctx.todos.get(target).status == TodoStatus.DONE.value
         after = client.get("/todos", **auth)
         assert after.status_code == 200
-        assert "Cookie 认证待办甲" not in after.text
-        assert f"/todos/{target}" not in after.text
+        main_region = after.text.split("最近完成")[0]
+        assert "Cookie 认证待办甲" not in main_region
+        assert f"/todos/{target}" not in main_region
         api_done = client.get("/api/v1/todos?status=done", **auth)
         assert api_done.status_code == 200
         assert [item["id"] for item in api_done.json()["todos"]] == [target]

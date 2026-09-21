@@ -278,8 +278,9 @@ def test_full_lifecycle(tmp_path, webhook_stub, manual_clock):
         done_list = client.get("/api/v1/todos?status=done").json()
         assert done_list["total"] == 1
         assert done_list["todos"][0]["id"] == todo_id
-        # 默认列表页不再显示已完成的那条
-        assert "备份失败" not in client.get("/todos").text
+        # 默认列表页的**主表**不再显示已完成的那条（「最近完成」栏目在主表下方，会显示它）
+        main_region = client.get("/todos").text.split("最近完成")[0]
+        assert "备份失败" not in main_region
         assert "已完成" in client.get(f"/todos/{todo_id}").text
 
         # --- 5. 完成后时钟继续前进也没有新请求（旧行为：完成后按间隔不再提醒） ---

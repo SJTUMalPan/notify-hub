@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -91,6 +91,30 @@ def _status_filter(status: str) -> TodoStatus | None:
     return TodoStatus.PENDING
 
 
+def _today(ctx: AppContext) -> date:
+    """「今天」＝注入时钟换算到 ``reminders.timezone`` 后的本地日期。
+
+    **禁止** ``datetime.now()`` / ``date.today()``：时间必须来自 ``ctx.clock``，
+    否则测试无法控制「今天」，跨模块不变量也会被破坏。
+    """
+    return ctx.clock.now().astimezone(ctx.settings.reminders.zone).date()
+
+
+def _recent_completed(ctx: AppContext) -> tuple[Any, ...]:
+    """今天（本地日期）完成的待办，按 ``completed_at`` 降序。"""
+    zone = ctx.settings.reminders.zone
+    today = _today(ctx)
+    views = ctx.todos.list(status=TodoStatus.DONE, limit=_UNBOUNDED)
+    recent = [
+        view
+        for view in views
+        if view.completed_at is not None
+        and as_utc(view.completed_at).astimezone(zone).date() == today
+    ]
+    recent.sort(key=lambda view: as_utc(view.completed_at), reverse=True)
+    return tuple(recent)
+
+
 def create_web_router(ctx: AppContext) -> APIRouter:
     """返回 Web 待办界面的全部页面路由。"""
     router = APIRouter(tags=["web"])
@@ -109,8 +133,20 @@ def create_web_router(ctx: AppContext) -> APIRouter:
         return templates.TemplateResponse(
             request,
             "todos_list.html",
-            {"todos": views, "status": status},
+            {
+                "todos": views,
+                "status": status,
+                "recent_completed": _recent_completed(ctx),
+            },
         )
+
+    @router.post("/todos/purge-completed")
+    def todos_purge_completed(
+        ctx: AppContext = Depends(_ctx),
+    ) -> RedirectResponse:
+        """清空「今天之前完成」的待办；**不接任何参数**，cutoff 不可被外部注入。"""
+        ctx.retention.purge_completed_older_than(_today(ctx))
+        return RedirectResponse(url="/todos", status_code=303)
 
     @router.post("/todos/{todo_id}/done")
     def todo_done(

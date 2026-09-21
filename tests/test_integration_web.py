@@ -274,12 +274,14 @@ def test_web_done_form_completes_todo_through_service_and_db(tmp_path, webhook_s
         assert todo.status is not None and todo.status == "done"
         assert todo.completed_at is not None
 
-        # 默认列表不再显示它；直接访问列表页也看不到
+        # 默认列表的**主表**不再显示它；直接访问列表页的主表也看不到
+        # （「最近完成」栏目渲染在主表下方，今天完成的待办按 §5.2 会出现在那里）
         after = client.get("/todos")
         assert after.status_code == 200
-        assert "备份失败" not in after.text
-        assert f"/todos/{todo_id}" not in after.text
-        assert 'action="/todos/' not in after.text
+        main_region = after.text.split("最近完成")[0]
+        assert "备份失败" not in main_region
+        assert f"/todos/{todo_id}" not in main_region
+        assert 'action="/todos/' not in main_region
 
         # 详情页仍可访问，并显示「已完成」
         detail = client.get(f"/todos/{todo_id}")

@@ -313,7 +313,10 @@ def test_todo_list_defaults_to_pending_and_supports_status_filter(ctx, manual_cl
 
     default_html = _render(client.get("/todos").content)
     assert "尚未完成的待办" in default_html
-    assert "已经完成的待办" not in default_html
+    # R5 修正：栏目按 §5.2 渲染在主表下方，今天完成的待办必然出现在整页上，
+    # 因此「主表不得列出已完成待办」只能对**主表区域**（字面量「最近完成」之前）断言。
+    default_main = default_html.split("最近完成")[0]
+    assert "已经完成的待办" not in default_main
 
     all_html = _render(client.get("/todos", params={"status": "all"}).content)
     assert "尚未完成的待办" in all_html
@@ -321,7 +324,8 @@ def test_todo_list_defaults_to_pending_and_supports_status_filter(ctx, manual_cl
 
     pending_html = _render(client.get("/todos", params={"status": "pending"}).content)
     assert "尚未完成的待办" in pending_html
-    assert "已经完成的待办" not in pending_html
+    pending_main = pending_html.split("最近完成")[0]
+    assert "已经完成的待办" not in pending_main
 
     done_html = _render(client.get("/todos", params={"status": "done"}).content)
     assert "已经完成的待办" in done_html
@@ -353,7 +357,8 @@ def test_post_done_redirects_to_todos_and_completes(ctx, manual_clock, client):
     assert row.status == TodoStatus.DONE
     assert row.completed_at is not None
 
-    assert "等待被点完成的待办" not in _render(client.get("/todos").content)
+    main_region = _render(client.get("/todos").content).split("最近完成")[0]
+    assert "等待被点完成的待办" not in main_region
 
     detail = client.get(f"/todos/{todo.id}")
     assert detail.status_code == 200

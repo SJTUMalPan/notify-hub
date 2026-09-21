@@ -4,15 +4,134 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}notify-hub{% endblock %}</title>
+  {# 零外部资源：全部样式内联，不引入任何 link/@import/webfont/前端框架。 #}
   <style>
-    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 1rem; line-height: 1.5; }
-    nav { margin-bottom: 1rem; }
-    nav a { margin-right: 1rem; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border: 1px solid #ccc; padding: .35rem .5rem; text-align: left; vertical-align: top; }
+    :root {
+      --bg: #f5f7fa;
+      --card: #ffffff;
+      --ink: #1f2933;
+      --muted: #6b7280;
+      --line: #d9e0e8;
+      --accent: #2f6feb;
+      --accent-dark: #1f4fb0;
+      --pending: #b45309;
+      --pending-bg: #fdf1dd;
+      --done: #15803d;
+      --done-bg: #e5f5ea;
+      --danger: #b91c1c;
+      --danger-bg: #fdecec;
+    }
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0;
+      padding: 0 0 2rem;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC",
+        "Microsoft YaHei", sans-serif;
+      line-height: 1.6;
+    }
+    nav, main {
+      max-width: 64rem;
+      margin: 0 auto;
+      padding: 0 1rem;
+    }
+    nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: center;
+      padding-top: .9rem;
+      padding-bottom: .9rem;
+      border-bottom: 1px solid var(--line);
+      background: var(--card);
+      max-width: none;
+    }
+    nav a { color: var(--accent); text-decoration: none; font-weight: 600; }
+    nav a:hover, nav a:focus { text-decoration: underline; }
+    main { padding-top: 1.25rem; }
+    h1 { font-size: 1.35rem; margin: 0 0 1rem; }
+    h2 { font-size: 1.05rem; margin: 0; }
+    a { color: var(--accent); }
+    a:hover, a:focus { color: var(--accent-dark); }
+    .muted { color: var(--muted); }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: .6rem;
+      padding: .9rem 1rem;
+      margin: 0 0 1.25rem;
+    }
+    .section-head {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .5rem 1rem;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: .5rem;
+    }
+    .recent-list { list-style: none; margin: 0; padding: 0; }
+    .recent-list li {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .15rem .75rem;
+      align-items: baseline;
+      padding: .4rem 0;
+      border-top: 1px solid var(--line);
+    }
+    .recent-list li:first-child { border-top: 0; }
+    .recent-list a { font-weight: 600; text-decoration: none; }
+    .recent-list a:hover, .recent-list a:focus { text-decoration: underline; }
+    /* 窄屏下表格横向滚动，绝不撑破页面 */
+    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      min-width: 40rem;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: .6rem;
+    }
+    caption { text-align: left; padding: .5rem 0; }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: .5rem .6rem;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #eef2f7; color: var(--muted); font-weight: 600; white-space: nowrap; }
+    tbody tr:hover { background: #f2f6fc; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .badge {
+      display: inline-block;
+      padding: .1rem .5rem;
+      border-radius: 999px;
+      font-size: .85rem;
+      white-space: nowrap;
+    }
+    .badge-pending { color: var(--pending); background: var(--pending-bg); }
+    .badge-done { color: var(--done); background: var(--done-bg); }
+    button {
+      font: inherit;
+      min-height: 2rem;
+      padding: .3rem .9rem;
+      border: 1px solid var(--line);
+      border-radius: .4rem;
+      background: var(--card);
+      color: var(--ink);
+      cursor: pointer;
+    }
+    button:hover, button:focus { border-color: var(--accent); color: var(--accent-dark); }
+    .danger { border-color: #f0b4b4; background: var(--danger-bg); color: var(--danger); }
+    .danger:hover, .danger:focus { border-color: var(--danger); color: var(--danger); }
     form.inline { display: inline; margin: 0; }
-    .muted { color: #666; }
-    pre.body { white-space: pre-wrap; word-break: break-word; margin: .25rem 0; }
+    pre.body {
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin: .25rem 0;
+      font-family: inherit;
+    }
   </style>
 </head>
 <body>
