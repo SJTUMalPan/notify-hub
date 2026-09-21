@@ -27,6 +27,7 @@ from notify_hub.delivery import DeliveryService
 from notify_hub.domain import TodoStatus
 from notify_hub.services.digest import DigestService
 from notify_hub.services.notifications import notification_for_digest
+from notify_hub.services.retention import RetentionService
 from notify_hub.services.todos import TodoService
 
 __all__ = ["ReminderScheduler"]
@@ -47,6 +48,7 @@ class ReminderScheduler:
         clock: Clock,
         settings: ReminderSettings,
         logger: logging.Logger,
+        retention: RetentionService | None = None,
     ) -> None:
         self._todos = todos
         self._delivery = delivery
@@ -54,6 +56,7 @@ class ReminderScheduler:
         self._clock = clock
         self._settings = settings
         self._logger = logger
+        self._retention = retention
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._running = False
@@ -108,6 +111,19 @@ class ReminderScheduler:
             self._logger.warning("汇总轮次异常: %s", exc)
             return 0
 
+    def _purge_expired(self) -> None:
+        """当天结算完成后触发回收；``retention`` 为 None 时跳过。
+
+        回收异常必须单独兜住：不能冒泡到 ``run_once`` 外层那个 ``except Exception``，
+        否则会被记成「汇总轮次异常」，误导排查方向。
+        """
+        if self._retention is None:
+            return
+        try:
+            self._retention.purge_expired()
+        except Exception as exc:  # noqa: BLE001 - 回收失败不得影响汇总语义
+            self._logger.warning("回收过期数据失败: %s", exc)
+
     def _run_once(self) -> int:
         now = self._clock.now()
         local = now.astimezone(self._settings.zone)
@@ -128,6 +144,7 @@ class ReminderScheduler:
 
         if not todos:
             self._digest.record(today, todo_count=0, delivered=True)
+            self._purge_expired()
             return 0
 
         message = notification_for_digest(todos, now=now)
@@ -162,4 +179,5 @@ class ReminderScheduler:
                 self._logger.warning(
                     "汇总记账失败，跳过继续: todo_id=%s: %s", todo.id, exc
                 )
+        self._purge_expired()
         return 1

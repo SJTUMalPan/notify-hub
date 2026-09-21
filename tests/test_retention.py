@@ -360,11 +360,16 @@ def test_cutoff_date_accepts_naive_now_and_normalizes_as_utc(
 def test_cutoff_date_naive_uses_utc_date_not_local_wall_date(
     db, manual_clock, tmp_settings
 ):
-    """北京时间 2024-04-10 07:00 ＝ UTC 2024-04-09 23:00：按 UTC 取日应为 04-09。"""
+    """naive 输入按 **UTC** 读（SQLite 读出的时间是裸的），不是本地墙钟时间。
+
+    naive ``2024-04-10 07:00`` ＝ UTC ``2024-04-10 07:00`` ＝ 北京时间 15:00，
+    本地自然日仍是 04-10，故 cutoff 为 ``04-10 - 30 天``。
+    若误按北京时间墙钟读（UTC 04-09 23:00，本地日 04-09）才会得到 04-09——那是错的。
+    """
     manual_clock.set(LOCAL_NOW)
     service = _service(db, manual_clock, days=30, zone=tmp_settings.reminders.zone)
-    naive_local_wall = datetime(2024, 4, 10, 7, 0, 0)
-    assert service.cutoff_date(naive_local_wall) == date(2024, 4, 9) - timedelta(days=30)
+    naive_utc = datetime(2024, 4, 10, 7, 0, 0)
+    assert service.cutoff_date(naive_utc) == date(2024, 4, 10) - timedelta(days=30)
 
 
 def test_cutoff_date_huge_days_does_not_raise(db, manual_clock, tmp_settings):
@@ -398,7 +403,7 @@ def test_deleted_total_sums_all_fields_except_unlinked(fields, expected):
 
 
 def test_is_empty_true_when_all_zero():
-    assert _report_cls().is_empty is True
+    assert _report_cls()().is_empty is True
 
 
 def test_is_empty_false_when_something_deleted():
@@ -559,20 +564,34 @@ def test_expired_completed_todo_and_its_events_deleted(db, manual_clock, tmp_set
 
 
 def test_delivery_of_deleted_todo_is_unlinked_not_deleted(db, manual_clock, tmp_settings):
-    """D4 的核心承诺：解绑（真的写 NULL）而不是删行，``message_id`` 不变。"""
+    """D4 的核心承诺：解绑（真的写 NULL）而不是删行，``message_id`` 不变。
+
+    该承诺的耐久形态只能在 ``purge_completed_older_than`` 上观察（§4.2）：
+    ``purge_expired`` 第 1 步解绑后，第 2 步必然把那条旧消息连同它的投递记录一起删掉。
+    这里待办完成于昨天、消息收于两天前，二者都在保留期内，故本方法不动 messages。
+    """
     zone = tmp_settings.reminders.zone
     clock = ManualClock(T0)
-    old = T0 - timedelta(days=100)
-    message_id = _make_message(db, received_at=old)
-    todo_id = _make_todo(db, message_id, status=TodoStatus.DONE.value, completed_at=old)
-    delivery_id = _make_delivery(db, attempted_at=old, message_id=message_id, todo_id=todo_id)
+    completed = T0 - timedelta(days=1)
+    received = T0 - timedelta(days=2)
+    message_id = _make_message(db, received_at=received)
+    todo_id = _make_todo(db, message_id, status=TodoStatus.DONE.value, completed_at=completed)
+    event_id = _make_todo_event(
+        db, todo_id, occurred_at=completed, kind=TodoEventKind.COMPLETED.value
+    )
+    delivery_id = _make_delivery(
+        db, attempted_at=received, message_id=message_id, todo_id=todo_id
+    )
     from notify_hub.models import DeliveryRecord
 
     before = _count(db, DeliveryRecord)
     service = _service(db, clock, days=DAYS, zone=zone)
 
-    report = service.purge_expired()
+    report = service.purge_completed_older_than(_local_date(T0, zone))
 
+    assert todo_id not in _todo_ids(db), "完成于昨天的待办（早于 cutoff）应被删除"
+    assert event_id not in _todo_event_ids(db), "被删待办的 todo_events 应一并删除"
+    assert message_id in _message_ids(db), "该方法明文不动 messages，消息必须存活"
     assert _count(db, DeliveryRecord) == before, "投递记录被删了，应当只解绑"
     row = _delivery_by_id(db, delivery_id)
     assert row is not None
@@ -838,8 +857,14 @@ def test_logs_nothing_when_nothing_happened(db, manual_clock, tmp_settings):
 # --------------------------------------------------------------------------- #
 # 调度器集成测试（ManualClock 推进，禁止真实等待）
 # --------------------------------------------------------------------------- #
-def _scheduler_fixture(db, manual_clock, tmp_settings, *, days=DAYS, retention=None):
-    """造一条 100 天前的已完成待办 + 一条 pending 待办，返回 (scheduler, retention, ids)。"""
+def _scheduler_fixture(
+    db, manual_clock, tmp_settings, *, days=DAYS, retention=None, notifiers=()
+):
+    """造一条 100 天前的已完成待办 + 一条 pending 待办，返回 (scheduler, retention, ids)。
+
+    ``notifiers`` 转交 ``_make_scheduler``：不接渠道时注册表为空，汇总投递必然失败
+    （``run_once`` 返回 0），所以需要「投递成功」语义的用例必须传入记录型渠道。
+    """
     zone = tmp_settings.reminders.zone
     clock = manual_clock
     clock.set(T0)
@@ -855,7 +880,7 @@ def _scheduler_fixture(db, manual_clock, tmp_settings, *, days=DAYS, retention=N
     if retention is None:
         retention = _service(db, clock, days=days, zone=zone)
     scheduler = _make_scheduler(
-        tmp_settings, clock=clock, retention=retention, db=db
+        tmp_settings, clock=clock, retention=retention, notifiers=notifiers, db=db
     )
     return scheduler, retention, {
         "old_todo": old_todo,
@@ -869,10 +894,13 @@ def test_scheduler_purges_after_settlement(
     db, manual_clock, tmp_settings, make_recording_notifier
 ):
     """推进时钟跨过触发时刻 → 汇总结算 → 过期数据被删。"""
-    scheduler, _, ids = _scheduler_fixture(db, manual_clock, tmp_settings)
+    notifier = make_recording_notifier("recording")
+    scheduler, _, ids = _scheduler_fixture(
+        db, manual_clock, tmp_settings, notifiers=(notifier,)
+    )
     manual_clock.set(LOCAL_TRIGGER)
 
-    with _capture(LOG) as records:
+    with _capture(_retention_logger()) as records:
         result = scheduler.run_once()
 
     assert result == 1
@@ -882,7 +910,10 @@ def test_scheduler_purges_after_settlement(
     assert ids["old_todo"] not in _todo_ids(db)
     assert ids["pending_todo"] in _todo_ids(db), "pending 待办不得被回收"
     assert ids["pending_message"] in _message_ids(db)
-    assert ids["old_message"] in _message_ids(db), "旧消息仍被 pending 待办引用"
+    assert ids["old_message"] not in _message_ids(db), (
+        "old_message 的唯一引用者已被清掉且自身超期 → 按 §3 第 2 步必须被删；"
+        "pending 那条消息的存活由上一行断言负责"
+    )
     infos = [r for r in records if r.levelno == logging.INFO]
     assert len(infos) >= 1, "回收确实发生了，应当有一条 INFO 汇总日志"
 
@@ -901,10 +932,13 @@ def test_scheduler_does_not_purge_before_trigger_time(db, manual_clock, tmp_sett
 
 
 def test_scheduler_does_not_purge_again_when_settled(
-    db, manual_clock, tmp_settings
+    db, manual_clock, tmp_settings, make_recording_notifier
 ):
     """当天已定案 → 第二轮不再回收，也不产生第二条回收日志。"""
-    scheduler, _, ids = _scheduler_fixture(db, manual_clock, tmp_settings)
+    notifier = make_recording_notifier("recording")
+    scheduler, _, ids = _scheduler_fixture(
+        db, manual_clock, tmp_settings, notifiers=(notifier,)
+    )
     manual_clock.set(LOCAL_TRIGGER)
 
     with _capture(_retention_logger()) as first_records:
@@ -969,10 +1003,13 @@ def test_retention_exception_does_not_break_digest_or_return_value(
 
 
 def test_scheduler_settles_but_deletes_nothing_when_days_zero(
-    db, manual_clock, tmp_settings
+    db, manual_clock, tmp_settings, make_recording_notifier
 ):
     """异常场景②：``days=0`` 时调度器照样结算，但一条数据都不删。"""
-    scheduler, _, ids = _scheduler_fixture(db, manual_clock, tmp_settings, days=0)
+    notifier = make_recording_notifier("recording")
+    scheduler, _, ids = _scheduler_fixture(
+        db, manual_clock, tmp_settings, days=0, notifiers=(notifier,)
+    )
     manual_clock.set(LOCAL_TRIGGER)
 
     result = scheduler.run_once()
