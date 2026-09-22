@@ -4,134 +4,90 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}notify-hub{% endblock %}</title>
-  {# 零外部资源：全部样式内联，不引入任何 link/@import/webfont/前端框架。 #}
+  {#
+    样式来源分两路，互不冲突：
+
+    1) 挂载进 DSH 子页面门户（style: inherit）时，宿主会在 </head> 前注入
+       /subpages/_assets/subpage.css（Pico classless + 深色 token 层 + OS 字体栈）；
+       本模板据此使用 Pico 语义元素（article / table / button / small）与 sp-* 组件类名，
+       因此在门户里与其它子页面风格一致。
+
+    2) 独立部署（notify-hub 自己的端口 / 公网入口）时没有宿主，所以页面**自带**同一套
+       基础样式，脱离门户也好看。
+
+    两路都不引任何 http(s) 资源；字体走系统字体栈（不内嵌中文字重）。
+  #}
   <style>
+    /* 独立部署兜底：与宿主公共样式同一套取值，门户内被覆盖也不会变样 */
     :root {
-      --bg: #f5f7fa;
-      --card: #ffffff;
-      --ink: #1f2933;
-      --muted: #6b7280;
-      --line: #d9e0e8;
-      --accent: #2f6feb;
-      --accent-dark: #1f4fb0;
-      --pending: #b45309;
-      --pending-bg: #fdf1dd;
-      --done: #15803d;
-      --done-bg: #e5f5ea;
-      --danger: #b91c1c;
-      --danger-bg: #fdecec;
+      color-scheme: dark;
+      --pico-background-color: #16181d;
+      --pico-color: #e6e8ec;
+      --pico-muted-color: #9aa2ad;
+      --pico-muted-border-color: #2a2e37;
+      --pico-primary: #4c8dff;
+      --pico-primary-background: #2f6fe4;
+      --pico-primary-border: #2f6fe4;
+      --pico-primary-inverse: #ffffff;
+      --pico-secondary-background: #262a33;
+      --pico-secondary-hover-background: #2f343f;
+      --pico-card-background-color: #1d2027;
+      --pico-code-background-color: #1a1d24;
+      --pico-border-radius: 8px;
+      --pico-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", "Source Han Sans SC", "Noto Sans CJK SC",
+        Roboto, Helvetica, Arial, sans-serif;
+      --pico-font-family-monospace: ui-monospace, SFMono-Regular, "SF Mono", Menlo,
+        Consolas, "Liberation Mono", monospace;
+      --pico-line-height: 1.6;
+      --sp-radius: 10px;
+      --sp-border: 1px solid var(--pico-muted-border-color);
+      --sp-ok: #3fb950;
+      --sp-warn: #d29922;
+      --sp-error: #f85149;
     }
-    * { box-sizing: border-box; }
-    html { -webkit-text-size-adjust: 100%; }
     body {
       margin: 0;
-      padding: 0 0 2rem;
-      background: var(--bg);
-      color: var(--ink);
-      font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC",
-        "Microsoft YaHei", sans-serif;
-      line-height: 1.6;
-    }
-    nav, main {
-      max-width: 64rem;
-      margin: 0 auto;
-      padding: 0 1rem;
+      background: var(--pico-background-color);
+      color: var(--pico-color);
+      font-family: var(--pico-font-family);
+      line-height: var(--pico-line-height);
     }
     nav {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 1rem;
-      align-items: center;
-      padding-top: .9rem;
-      padding-bottom: .9rem;
-      border-bottom: 1px solid var(--line);
-      background: var(--card);
-      max-width: none;
+      display: flex; gap: 1rem; align-items: center;
+      padding: .75rem 18px; border-bottom: 1px solid var(--pico-muted-border-color);
+      background: var(--pico-card-background-color);
     }
-    nav a { color: var(--accent); text-decoration: none; font-weight: 600; }
-    nav a:hover, nav a:focus { text-decoration: underline; }
-    main { padding-top: 1.25rem; }
-    h1 { font-size: 1.35rem; margin: 0 0 1rem; }
-    h2 { font-size: 1.05rem; margin: 0; }
-    a { color: var(--accent); }
-    a:hover, a:focus { color: var(--accent-dark); }
-    .muted { color: var(--muted); }
-    .card {
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: .6rem;
-      padding: .9rem 1rem;
-      margin: 0 0 1.25rem;
-    }
-    .section-head {
-      display: flex;
-      flex-wrap: wrap;
-      gap: .5rem 1rem;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: .5rem;
-    }
-    .recent-list { list-style: none; margin: 0; padding: 0; }
-    .recent-list li {
-      display: flex;
-      flex-wrap: wrap;
-      gap: .15rem .75rem;
-      align-items: baseline;
-      padding: .4rem 0;
-      border-top: 1px solid var(--line);
-    }
-    .recent-list li:first-child { border-top: 0; }
-    .recent-list a { font-weight: 600; text-decoration: none; }
-    .recent-list a:hover, .recent-list a:focus { text-decoration: underline; }
-    /* 窄屏下表格横向滚动，绝不撑破页面 */
-    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-    table {
-      border-collapse: collapse;
-      width: 100%;
-      min-width: 40rem;
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: .6rem;
-    }
-    caption { text-align: left; padding: .5rem 0; }
-    th, td {
-      border-bottom: 1px solid var(--line);
-      padding: .5rem .6rem;
-      text-align: left;
-      vertical-align: top;
-    }
-    th { background: #eef2f7; color: var(--muted); font-weight: 600; white-space: nowrap; }
-    tbody tr:hover { background: #f2f6fc; }
-    tbody tr:last-child td { border-bottom: 0; }
-    .badge {
-      display: inline-block;
-      padding: .1rem .5rem;
-      border-radius: 999px;
-      font-size: .85rem;
-      white-space: nowrap;
-    }
-    .badge-pending { color: var(--pending); background: var(--pending-bg); }
-    .badge-done { color: var(--done); background: var(--done-bg); }
+    nav a { font-weight: 600; }
+    main { max-width: 1080px; margin: 0 auto; padding: 20px 18px 48px; }
+    h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 14px; }
+    h2 { font-size: 1.05rem; font-weight: 600; margin: 1.5rem 0 .6rem; }
+    a { color: var(--pico-primary); text-decoration: none; }
+    a:hover, a:focus { text-decoration: underline; }
+    table { width: 100%; border-collapse: collapse; background: var(--pico-card-background-color); border: 1px solid var(--pico-muted-border-color); border-radius: var(--sp-radius); }
+    th, td { border-bottom: 1px solid var(--pico-muted-border-color); padding: .5rem .6rem; text-align: left; vertical-align: top; }
+    th { background: var(--pico-code-background-color); color: var(--pico-muted-color); font-weight: 600; white-space: nowrap; }
+    tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
+    tbody tr:hover { background: var(--pico-secondary-background); }
     button {
-      font: inherit;
-      min-height: 2rem;
-      padding: .3rem .9rem;
-      border: 1px solid var(--line);
-      border-radius: .4rem;
-      background: var(--card);
-      color: var(--ink);
-      cursor: pointer;
+      font: inherit; min-height: 2rem; padding: .3rem .9rem; cursor: pointer;
+      border: 1px solid var(--pico-muted-border-color); border-radius: 7px;
+      background: var(--pico-secondary-background); color: var(--pico-color);
     }
-    button:hover, button:focus { border-color: var(--accent); color: var(--accent-dark); }
-    .danger { border-color: #f0b4b4; background: var(--danger-bg); color: var(--danger); }
-    .danger:hover, .danger:focus { border-color: var(--danger); color: var(--danger); }
+    button:hover, button:focus { background: var(--pico-secondary-hover-background); }
+    button.danger { color: var(--sp-error); border-color: var(--sp-error); background: transparent; }
     form.inline { display: inline; margin: 0; }
-    pre.body {
-      white-space: pre-wrap;
-      word-break: break-word;
-      margin: .25rem 0;
-      font-family: inherit;
-    }
+    pre.body { white-space: pre-wrap; word-break: break-word; margin: .25rem 0; font-family: inherit; }
+    .sp-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .sp-list { list-style: none; margin: 0; padding: 0; }
+    .sp-list li { display: flex; flex-wrap: wrap; gap: .15rem .75rem; align-items: baseline; padding: .4rem 0; border-top: 1px solid var(--pico-muted-border-color); }
+    .sp-list li:first-child { border-top: 0; }
+    .sp-card { background: var(--pico-card-background-color); border: 1px solid var(--pico-muted-border-color); border-radius: var(--sp-radius); padding: 14px 16px; margin-bottom: 12px; }
+    .sp-section-head { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; justify-content: space-between; margin-bottom: .5rem; }
+    .sp-badge { display: inline-block; padding: .1rem .55rem; border-radius: 999px; font-size: .8rem; white-space: nowrap; border: 1px solid transparent; }
+    .sp-badge--ok { color: var(--sp-ok); border-color: color-mix(in srgb, var(--sp-ok) 40%, transparent); }
+    .sp-badge--warn { color: var(--sp-warn); border-color: color-mix(in srgb, var(--sp-warn) 40%, transparent); }
+    .sp-badge--muted { color: var(--pico-muted-color); border-color: var(--pico-muted-border-color); }
   </style>
 </head>
 <body>

@@ -2,6 +2,7 @@
 {% block title %}消息列表 · notify-hub{% endblock %}
 {% block content %}
 <h1>消息列表</h1>
+<div class="sp-table-wrap">
 <table>
   <thead>
     <tr>
@@ -24,8 +25,9 @@
       <td>{% if message.needs_ack %}需要{% else %}不需要{% endif %}</td>
     </tr>
     {% else %}
-    <tr><td colspan="6" class="muted">暂无消息</td></tr>
+    <tr><td colspan="6"><small>暂无消息</small></td></tr>
     {% endfor %}
   </tbody>
 </table>
+</div>
 {% endblock %}

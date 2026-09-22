@@ -7,10 +7,10 @@
   <a href="/todos?status=pending">待完成</a>
   <a href="/todos?status=done">已完成</a>
   <a href="/todos?status=all">全部</a>
-  <span class="muted">当前：{{ status }}</span>
+  <small>当前：{{ status }}</small>
 </p>
 
-<div class="table-wrap">
+<div class="sp-table-wrap">
 <table>
   <thead>
     <tr>
@@ -31,7 +31,7 @@
       <td><a href="/todos/{{ todo.id }}">{{ todo.title }}</a></td>
       <td>{{ todo.first_notified_at | format_time }}</td>
       <td>{{ format_duration(todo.overdue_seconds) }}</td>
-      <td><span class="badge badge-{{ todo.status.value }}">{{ todo.status | status_label }}</span></td>
+      <td><span class="sp-badge sp-badge--{{ 'ok' if todo.status.value == 'done' else 'warn' }}">{{ todo.status | status_label }}</span></td>
       <td>
         {% if todo.status.value != "done" %}
         <form class="inline" method="post" action="/todos/{{ todo.id }}/done">
@@ -41,14 +41,14 @@
       </td>
     </tr>
     {% else %}
-    <tr><td colspan="7" class="muted">没有匹配的待办</td></tr>
+    <tr><td colspan="7"><small>没有匹配的待办</small></td></tr>
     {% endfor %}
   </tbody>
 </table>
 </div>
 
-<section class="card">
-  <div class="section-head">
+<section class="sp-card">
+  <div class="sp-section-head">
     <h2>最近完成</h2>
     <form class="inline" method="post" action="/todos/purge-completed"
           onsubmit="return confirm('确定清空今天之前完成的待办吗？此操作不可撤销。')">
@@ -56,16 +56,16 @@
     </form>
   </div>
   {% if recent_completed %}
-  <ul class="recent-list">
+  <ul class="sp-list">
     {% for todo in recent_completed %}
     <li>
       <a href="/todos/{{ todo.id }}">{{ todo.title }}</a>
-      <span class="muted">完成于 {{ todo.completed_at | format_time }} · 处理耗时 {{ format_duration(todo.overdue_seconds) }}</span>
+      <small>完成于 {{ todo.completed_at | format_time }} · 处理耗时 {{ format_duration(todo.overdue_seconds) }}</small>
     </li>
     {% endfor %}
   </ul>
   {% else %}
-  <p class="muted">今天还没有完成的待办</p>
+  <p><small>今天还没有完成的待办</small></p>
   {% endif %}
 </section>
 {% endblock %}

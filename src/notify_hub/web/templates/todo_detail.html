@@ -19,7 +19,7 @@
       <td>{% if event.delivery_ok is none %}-{% elif event.delivery_ok %}成功{% else %}失败{% endif %}</td>
     </tr>
     {% else %}
-    <tr><td colspan="4" class="muted">暂无事件</td></tr>
+    <tr><td colspan="4"><small>暂无事件</small></td></tr>
     {% endfor %}
   </tbody>
 </table>
@@ -79,7 +79,7 @@
       <td>{{ record.error_reason or "-" }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="5" class="muted">暂无投递记录</td></tr>
+    <tr><td colspan="5"><small>暂无投递记录</small></td></tr>
     {% endfor %}
   </tbody>
 </table>
