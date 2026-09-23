@@ -84,6 +84,22 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/todos/1/done
 未在提醒间隔内完成的待办会按 `reminders` 配置重复提醒；消息历史可浏览 `/messages` 与
 `/messages/{id}`。
 
+## DSH 插件（`dsh-plugin/`）
+
+仓库里还带一个 DSH 宿主插件：模型用 `ask_user_question` 提问后，若超过阈值（默认 60 分钟）
+无人回答，就往本服务的 `POST /api/v1/messages` 投一条 `need_ack` 消息，落成待办并推送。
+
+它**只是本服务的一个普通消息生产者**，不改本服务任何代码、不需要额外规则：
+
+```bash
+# 装进 DSH 的 web profile（换机器时用 git 形式，见插件 README）
+dsh plugin --profile web add "git+https://github.com/SJTUMalPan/notify-hub#<sha>&path:/dsh-plugin"
+```
+
+配置只需两个环境变量：`DSH_NOTIFY_HUB_ENDPOINT`（默认 `http://127.0.0.1:8000`）与
+`DSH_NOTIFY_HUB_TOKEN`（本服务 `server.auth_token` 的值）。完整说明见
+[dsh-plugin/README.md](dsh-plugin/README.md)。
+
 ## 文档索引
 
 - [配置说明](docs/configuration.md)：每个配置键、环境变量与凭据引用方式、提醒参数关系。
