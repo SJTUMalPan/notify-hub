@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>notify-hub · 架构与数据流</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d2129; --line:#2a2f3a;
+    --fg:#e6e8ee; --dim:#98a0b3; --dim2:#6b7385;
+    --accent:#4c8dff; --accent2:#22c55e; --warn:#f59e0b; --danger:#ef4444;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--fg);
+    font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code,.mono{font-family:var(--mono);font-size:.92em}
+  header{padding:20px 26px 14px;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#171a21,#0f1115)}
+  h1{margin:0 0 6px;font-size:19px;letter-spacing:.2px}
+  .sub{color:var(--dim);font-size:13px}
+  .tabs{display:flex;gap:4px;padding:12px 26px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  .tab{padding:8px 14px;border-radius:8px 8px 0 0;cursor:pointer;color:var(--dim);font-size:13px;border:1px solid transparent;border-bottom:none}
+  .tab:hover{color:var(--fg)}
+  .tab.on{background:var(--panel);color:var(--fg);border-color:var(--line)}
+  main{padding:18px 26px 60px}
+  .view{display:none} .view.on{display:block}
+  .grid{display:grid;grid-template-columns:minmax(320px,1fr) minmax(360px,1.15fr);gap:18px;align-items:start}
+  @media(max-width:980px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .card h2{margin:0 0 12px;font-size:13px;text-transform:uppercase;letter-spacing:.9px;color:var(--dim2);font-weight:600}
+
+  /* 分层图 */
+  .layer{border:1px solid var(--line);border-radius:10px;padding:9px 11px;margin-bottom:7px;background:var(--panel2);transition:.22s;position:relative}
+  .layer .lt{font-size:11px;color:var(--dim2);letter-spacing:.6px;margin-bottom:7px}
+  .layer .mods{display:flex;gap:6px;flex-wrap:wrap}
+  .mod{border:1px solid var(--line);background:#141821;border-radius:7px;padding:5px 9px;font-size:12px;color:var(--dim);transition:.22s;cursor:default}
+  .mod.hot{border-color:var(--accent);background:#16233c;color:#cfe0ff}
+  .layer.hot{border-color:var(--accent);box-shadow:0 0 0 1px #4c8dff44 inset}
+  .arrow{text-align:center;color:var(--dim2);font-size:12px;margin:-2px 0 5px}
+
+  /* 步骤 */
+  .steps{display:flex;flex-direction:column;gap:5px}
+  .step{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border:1px solid var(--line);border-radius:9px;cursor:pointer;transition:.18s;background:var(--panel2)}
+  .step:hover{border-color:#3d4757}
+  .step.on{border-color:var(--accent);background:#16233c}
+  .step .n{flex:0 0 22px;height:22px;border-radius:50%;background:#232937;color:var(--dim);display:grid;place-items:center;font-size:11px;font-weight:700}
+  .step.on .n{background:var(--accent);color:#fff}
+  .step .t{font-size:13px}
+  .step .d{font-size:11.5px;color:var(--dim2);margin-top:1px}
+  .step.async .n{background:#3a2d10;color:var(--warn)}
+  .step.async.on .n{background:var(--warn);color:#1a1200}
+
+  /* 详情 */
+  .det h3{margin:0 0 3px;font-size:15px}
+  .det .kicker{font-size:11.5px;color:var(--dim2);margin-bottom:12px}
+  .det .blk{margin-bottom:13px}
+  .det .blk .h{font-size:11px;color:var(--dim2);letter-spacing:.7px;text-transform:uppercase;margin-bottom:5px}
+  .fileitem{border-left:2px solid var(--line);padding:3px 0 3px 10px;margin-bottom:5px}
+  .fileitem .fp{font-family:var(--mono);font-size:12px;color:#bcd0ff;word-break:break-all}
+  .fileitem .fn{font-family:var(--mono);font-size:12px;color:var(--accent2)}
+  .fileitem .fd{font-size:12px;color:var(--dim);margin-top:1px}
+  .pill{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;border:1px solid var(--line);color:var(--dim);margin-right:5px;margin-bottom:4px}
+  .pill.blue{border-color:#2b4a80;color:#9dc0ff;background:#152238}
+  .pill.green{border-color:#22543a;color:#86efac;background:#0f2a1d}
+  .pill.amber{border-color:#5a4318;color:#fcd34d;background:#2a2008}
+  .note{font-size:12.5px;color:var(--dim);border-left:2px solid var(--warn);padding-left:10px;margin-top:6px}
+  .warnbox{border-left-color:var(--danger)}
+
+  /* 模块地图 */
+  .filter{width:100%;padding:9px 12px;border-radius:9px;border:1px solid var(--line);background:var(--panel2);color:var(--fg);font-size:13px;margin-bottom:14px}
+  .filter:focus{outline:none;border-color:var(--accent)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim2);font-size:11px;text-transform:uppercase;letter-spacing:.7px;font-weight:600}
+  td.p{font-family:var(--mono);font-size:12px;color:#bcd0ff;white-space:nowrap}
+  td.d{color:var(--dim)}
+  tr:hover td{background:#1b1f28}
+  .grp{margin:18px 0 6px;font-size:12px;color:var(--dim2);letter-spacing:.8px;text-transform:uppercase}
+
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--dim2);margin-top:10px}
+  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
+  footer{color:var(--dim2);font-size:12px;padding:0 26px 40px}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>notify-hub · 架构与数据流</h1>
+  <div class="sub">一台常驻服务：<b>进程投递消息</b> → <b>按配置规则分类</b> → <b>需要人处理的变成待办</b> → <b>通过渠道通知，直到你点完成</b></div>
+</header>
+
+<div class="tabs">
+  <div class="tab on" data-v="flow">① 数据流步进器</div>
+  <div class="tab" data-v="map">② 模块地图</div>
+  <div class="tab" data-v="inv">③ 不变量与后台线程</div>
+</div>
+
+<main>
+  <!-- ===================== 数据流 ===================== -->
+  <section class="view on" id="v-flow">
+    <div class="grid">
+      <div class="card">
+        <h2>分层架构（点步骤即高亮）</h2>
+        <div id="layers"></div>
+        <div class="legend">
+          <span><i style="background:#4c8dff"></i>当前步骤涉及的层</span>
+          <span><i style="background:#3a2d10"></i>发生在后台线程</span>
+        </div>
+      </div>
+      <div>
+        <div class="card" style="margin-bottom:14px">
+          <h2>主链路步骤</h2>
+          <div class="steps" id="steps"></div>
+        </div>
+        <div class="card det" id="detail"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 模块地图 ===================== -->
+  <section class="view" id="v-map">
+    <div class="card">
+      <h2>文件 → 职责</h2>
+      <input class="filter" id="filter" placeholder="过滤：输入文件名、目录或职责关键字，例如 scheduler / 脱敏 / 渠道">
+      <div id="mapbody"></div>
+    </div>
+  </section>
+
+  <!-- ===================== 不变量 ===================== -->
+  <section class="view" id="v-inv">
+    <div class="card" style="margin-bottom:16px">
+      <h2>六条跨模块不变量（读代码最容易踩的地方）</h2>
+      <div id="invs"></div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
+      <h2>三条常驻后台线程</h2>
+      <table>
+        <thead><tr><th>线程名</th><th>来源</th><th>干什么</th></tr></thead>
+        <tbody>
+          <tr><td class="p">notify-hub-rule-reloader</td><td class="p">classifier/__init__.py</td><td class="d">轮询规则文件 mtime，变更即热加载；坏配置保留上一份可用规则集</td></tr>
+          <tr><td class="p">notify-hub-ingest-worker</td><td class="p">pipeline.py</td><td class="d">从 <code>queue.Queue</code> 取 message_id，做首次通知投递</td></tr>
+          <tr><td class="p">notify-hub-reminder-scheduler</td><td class="p">services/scheduler.py</td><td class="d">周期扫描本地时刻，每天到点发一条汇总</td></tr>
+        </tbody>
+      </table>
+      <div class="note">除 FastAPI 路由外，全部是<b>同步代码</b>：<code>Notifier.send()</code> 是同步的，
+      两个后台组件是「守护线程 + threading.Event」，不是 asyncio。首次通知之所以不阻塞响应，
+      靠的是 <code>queue.Queue</code> + 单个工作线程，而不是 FastAPI 的 <code>BackgroundTasks</code>
+      ——后者在 TestClient 下会阻塞响应，导致「慢渠道不影响响应」无法被测试固定。</div>
+    </div>
+    <div class="card">
+      <h2>五张表</h2>
+      <table>
+        <thead><tr><th>表</th><th>一行代表什么</th></tr></thead>
+        <tbody>
+          <tr><td class="p">messages</td><td class="d">一条接入的消息 + 它的分类结论（命中哪条规则、分类名、标签、是否入待办及原因）</td></tr>
+          <tr><td class="p">todos</td><td class="d">一条待办（状态、首次/上次通知时间、提醒次数、完成时间）。<code>(source, dedup_key)</code> 上有部分唯一索引，仅约束「待完成」且跳过 NULL</td></tr>
+          <tr><td class="p">deliveries</td><td class="d"><b>每一次投递尝试</b>（渠道、时间、成功与否、失败原因、是否首选/是否降级）</td></tr>
+          <tr><td class="p">todo_events</td><td class="d">待办的时间序列（创建 / 每次提醒 / 完成），详情页靠它回溯</td></tr>
+          <tr><td class="p">digest_runs</td><td class="d">某个<b>本地自然日</b>的汇总状态（是否已定案/已送达、覆盖待办数、尝试次数、失败原因）。<code>local_date</code> 唯一索引，保证当天只发一条且重启不重复</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer>
+  内容对应提交 <code>feat/add-notify-hub</code>，并已同步 <code>add-public-access</code>（访问认证层）。契约级规格见
+  <code>openspec/changes/archive/2026-09-18-add-notify-hub/architecture.md</code> 与
+  <code>openspec/changes/add-public-access/architecture.md</code>，文字走读见 <code>docs/architecture-overview.md</code>。
+</footer>
+
+<script>
+/* ------------------------------------------------------------------ 分层 */
+const LAYERS = [
+  {id:"L4", title:"L4 · 入口层", mods:[
+    {id:"auth", label:"M-A auth.py", files:"AuthGuard：纯 ASGI 中间件，除 /healthz 外全路由要求凭据"},
+    {id:"api", label:"M7 api/*", files:"api/schemas.py · api/messages.py · api/todos.py · api/health.py"},
+    {id:"web", label:"M8 web/*", files:"web/routes.py + templates/*.html"},
+    {id:"cli", label:"M5 cli.py", files:"cli.py（独立 HTTP 客户端）"}]},
+  {id:"L3", title:"L3 · 编排层", mods:[
+    {id:"pipeline", label:"M7 pipeline.py", files:"IngestPipeline：分类→落库→待办→后台派发"}]},
+  {id:"L2", title:"L2 · 领域层", mods:[
+    {id:"services", label:"M6 services/*", files:"messages.py · todos.py · notifications.py · digest.py · scheduler.py"},
+    {id:"delivery", label:"M4 delivery.py", files:"渠道选择与降级"},
+    {id:"notifiers", label:"M4 notifiers/*", files:"base.py（契约）· registry.py · webhook.py · email.py · feishu.py"},
+    {id:"classifier", label:"M3 classifier/*", files:"rules.py · engine.py · loader.py"}]},
+  {id:"L1", title:"L1 · 基础层", mods:[
+    {id:"config", label:"M1 config/redact/logging", files:"config.py · redact.py · logging_setup.py"},
+    {id:"db", label:"M2 db.py / models.py", files:"Database · 四张表的 ORM"}]},
+  {id:"L0", title:"L0 · 共享契约与组合根", mods:[
+    {id:"shared", label:"domain · errors · clock", files:"domain.py · errors.py · clock.py"},
+    {id:"root", label:"context · app · main", files:"context.py（组合根）· app.py · main.py"}]}
+];
+
+/* ------------------------------------------------------------------ 步骤 */
+// layers 统一归一化为数组：不得依赖字符串的 includes 做子串匹配（那只是碰巧成立）
+const S = (n,t,d,layers,what,files,out,note,async_) => ({
+  n,t,d,
+  layers: Array.isArray(layers)?layers:[layers],
+  what,files,out,note,
+  async: !!async_
+});
+const STEPS = [
+S(1,"认证","所有 HTTP 入口的前置步骤","L4",
+  "除 <code>/healthz</code> 外的<b>每一个</b>路由都要求凭据——包括本身没有独立鉴权的投递入口 <code>POST /api/v1/messages</code>。<br>守卫只认 <code>?token=</code> 查询参数与会话 Cookie <code>nh_session</code>（值是令牌的 HMAC，不是令牌本身），<b>不读任何请求头</b>，所以 CLI 也走查询参数。<br>浏览器导航形态（<code>GET</code> + <code>Accept</code> 含 <code>text/html</code>）首次带 <code>?token=</code> 时，返回 <code>303</code> 到去掉令牌的同一地址并种下 Cookie；其余已认证请求直接透传。",
+  [["auth.py","AuthGuard.__call__()","判定顺序：非 HTTP 透传 → 守卫关闭透传 → /healthz 放行 → 校验查询令牌/会话 Cookie → 401 按 Accept 分型"],
+   ["auth.py","session_value(token)","会话 Cookie 值 = HMAC-SHA256(token, SESSION_MESSAGE)，小写十六进制"],
+   ["auth.py","strip_token_param()","303 的 Location 去掉全部 token 键值对，保留其余参数原有顺序"],
+   ["app.py","create_app() · add_middleware","唯一装配点（不装进 create_web_app / create_api_app）；auth_token is None 时另打一条 WARNING"]],
+  "303 + Set-Cookie nh_session（HttpOnly · Path=/ · SameSite=Lax · 不设 Secure）/ 401 / 透传",
+  "未配置 <code>server.auth_token</code> 时守卫整体关闭：全量透传是刻意的 fail-open 默认，主缓解在仓库外的暴露脚本（未配置令牌时拒绝启动转发），应用侧只有一条 WARNING。"),
+S(2,"接入","HTTP POST 到达","L4",
+  "路由先做字段校验（缺必填字段 / level 非法 → 422，<b>且不落库</b>），然后把请求体转成领域层的 <code>MessageDraft</code>。",
+  [["api/messages.py","post_message()","路由处理：校验通过后构造 draft"],
+   ["api/schemas.py","MessageIn","Pydantic 模型，字段名即对外契约"],
+   ["services/messages.py","MessageDraft","与请求体解耦的领域输入对象"]],
+  "MessageDraft"),
+S(3,"受理编排","一次同步调用串起前三步",["L3","L2"],
+  "受理只做四件事，全部同步完成：<b>分类 → 落库 → 生成待办 → 入队</b>。最后一步只是把 message_id 放进队列，所以接口能立刻返回 202。",
+  [["pipeline.py","IngestPipeline.accept()","受理编排的唯一样例"],
+   ["pipeline.py","queue.put(message_id)","run_inline=True 时改为直接 dispatch（测试用）"]],
+  "AcceptOutcome(message_id, todo_id, verdict)"),
+S(4,"分类","按配置规则决定分类与是否入待办","L2",
+  "按声明顺序找<b>首个命中的规则</b>（同规则内多条件「与」、候选值「或」）；没命中就套用 defaults。<br>入待办判定：<b>调用方声明 need_ack 或 规则要求，两者冲突以「入待办」为准</b>——规则不得把调用方明确要求确认的消息降级为纯通知。",
+  [["classifier/__init__.py","RuleClassifier.classify()","门面；ruleset 实时委派给 loader，故热加载立即生效"],
+   ["classifier/engine.py","RuleEngine.classify()","纯函数匹配引擎"],
+   ["domain.py","ClassificationVerdict","分类结论（跨模块共享类型）"]],
+  "ClassificationVerdict(rule_id, category, labels, need_ack, ack_reason, preferred_channel)"),
+S(5,"落库","写入消息与其分类结论",["L2","L1"],
+  "把原始字段与分类结论一起写进 <code>messages</code>。<b>分类结论必须持久化</b>——否则规则调整后就无法回溯「这条消息当初为什么被判成要处理」。",
+  [["services/messages.py","MessageService.create(draft, verdict)","写 messages 行"],
+   ["db.py","Database.session()","上下文管理器；expire_on_commit=False，退出后仍可读 ORM 属性"],
+   ["models.py","Message","ORM 定义（含 rule_id / category / labels / needs_ack / ack_reason）"]],
+  "Message 行（含 id）"),
+S(6,"生成待办","需要人处理的才建，且要幂等","L2",
+  "只有 <code>needs_ack</code> 为真才建待办；否则返回 <code>None</code>（纯通知，不打扰）。<br>按 <code>(source, dedup_key)</code> 去重，靠数据库的<b>部分唯一索引</b>兜底：仅约束「待完成」且跳过 NULL，所以待办完成后同样的 key 可以再建。",
+  [["services/todos.py","TodoService.ensure_for_message()","建待办 + 去重"],
+   ["models.py","Todo / TodoEvent","待办行 + 时间序列的第一条 created"]],
+  "Todo 行 或 None"),
+S(7,"派发","入队后立即返回 202","L3",
+  "响应此时已经返回给调用方。真正的投递在后台线程 <code>notify-hub-ingest-worker</code> 里进行——<b>渠道慢或挂掉都不会传导成投递方进程的卡顿</b>。",
+  [["pipeline.py","queue.Queue + 工作线程","单线程消费，保证投递顺序可控"],
+   ["api/messages.py","status_code=202","含义是「已受理」而非「已送达」"]],
+  "HTTP 202 {message_id, todo_id}"),
+S(8,"构造通知","把消息行渲染成与渠道无关的通知","L2",
+  "产出渠道无关的 <code>NotificationMessage</code>。注意 <b>body 已经是成品正文</b>——里面含「来源 / 分类 / 时间 + 空行 + 原文」，适配器只负责标题，不得再拼一遍表头。",
+  [["pipeline.py","IngestPipeline.dispatch()","后台线程入口：读消息 → 构造 → 投递"],
+   ["services/notifications.py","notification_for_message()","首次通知文案（正文即成品）；汇总文案另见 notification_for_digest()"],
+   ["notifiers/base.py","NotificationMessage","统一消息结构（标题/正文/级别/来源/时间/超时）"]],
+  "NotificationMessage",null,true),
+S(9,"选渠道并投递","首选 → 默认 → 其余，逐次记档","L2",
+  "候选渠道顺序：<b>分类指定的首选 → 配置的默认 → 其余</b>（去重保序）。首选不可用或失败就降级，并在投递记录里标注是降级及原因。<br>适配器<b>不会抛异常</b>——所有渠道侧/网络侧错误都转成失败结果。",
+  [["delivery.py","DeliveryService.deliver()","渠道选择、降级、写投递记录"],
+   ["notifiers/registry.py","NotifierRegistry.get()","按 channel_id 取适配器；不可用的记原因"],
+   ["notifiers/feishu.py","FeishuNotifier.send()","加签 + 嵌套载荷；业务错误码非 0 也算失败"],
+   ["models.py","DeliveryRecord","每一次尝试一行"]],
+  "DeliveryOutcome + deliveries 行",null,true),
+S(10,"每日汇总","每天固定本地时间一条，覆盖全部未完成","L2",
+  "独立线程周期扫描本地时刻：<code>timezone</code> 下越过 <code>at</code>（默认 21:00 Asia/Shanghai）后，<b>第一轮检查就定案</b>——当时没有未完成待办则不发、当天也不再发。<br>当天投递失败会在<b>同一自然日内</b>按 <code>scan_interval_seconds</code> 重试，<b>跨天不补发</b>；「今天发没发/检查没检查」持久化在 <code>digest_runs</code>，重启不重复也不吞掉。",
+  [["services/scheduler.py","ReminderScheduler.run_once()","一轮检查：本地时刻判定 → 汇总 → 逐条记账；单条出错不中断整轮"],
+   ["services/digest.py","DigestService.state_for() / record()","按本地日期读写当日定案状态（唯一索引，重启安全）"],
+   ["services/notifications.py","notification_for_digest(todos, now=…)","渲染「[待办汇总] N 项未完成」+ 逐条「已超时」明细，按超时时长降序"],
+   ["services/todos.py","TodoService.record_reminder()","每条被覆盖的待办更新 last_notified_at / reminder_count + 写事件"]],
+  "一条 deliveries(message_id=todo_id=None) + 每条待办一条 todo_events(reminder)",null,true),
+S(11,"完成","从此刻起不再提醒",["L4","L2"],
+  "两个入口共用同一套 service 方法，不存在两份业务逻辑：<b>Web 页面表单</b>与 <b>CLI <code>notify todo done</code></b>（后者走 HTTP）。<br>完成是<b>幂等</b>的：重复完成不改变原完成时间；已完成不会再回到待完成。",
+  [["web/routes.py","POST /todos/{id}/done","页面表单 → 303 重定向回列表"],
+   ["api/todos.py","complete_todo()","HTTP 接口（CLI 用它）"],
+   ["services/todos.py","TodoService.complete()","记 completed_at + 写 todo_events(completed)"]],
+  "Todo 状态 done；此后不再进入每日汇总的未完成列表")
+];
+
+/* ------------------------------------------------------------------ 渲染 */
+const $ = s => document.querySelector(s);
+const el = (t,c,h) => { const e=document.createElement(t); if(c)e.className=c; if(h!=null)e.innerHTML=h; return e; };
+
+function renderLayers(hot){
+  const box = $("#layers"); box.innerHTML="";
+  LAYERS.forEach((L,i)=>{
+    const on = hot.includes(L.id);
+    const d = el("div","layer"+(on?" hot":""));
+    d.appendChild(el("div","lt",L.title));
+    const m = el("div","mods");
+    L.mods.forEach(x=>{
+      const b = el("div","mod"+(on?" hot":""), x.label);
+      b.title = x.files;
+      m.appendChild(b);
+    });
+    d.appendChild(m); box.appendChild(d);
+    if(i<LAYERS.length-1) box.appendChild(el("div","arrow","▼ 只允许向下依赖"));
+  });
+}
+
+function renderSteps(){
+  const box=$("#steps"); box.innerHTML="";
+  STEPS.forEach((s,i)=>{
+    const d=el("div","step"+(s.async?" async":"")+(i===0?" on":""));
+    d.dataset.i=i;
+    d.appendChild(el("div","n",s.async?"⏱":String(s.n)));
+    const t=el("div");
+    t.appendChild(el("div","t",s.t));
+    t.appendChild(el("div","d",s.d));
+    d.appendChild(t);
+    d.onclick=()=>select(i);
+    box.appendChild(d);
+  });
+}
+
+function select(i){
+  const s=STEPS[i];
+  document.querySelectorAll(".step").forEach(x=>x.classList.toggle("on", +x.dataset.i===i));
+  renderLayers(s.layers);
+  const D=$("#detail"); D.innerHTML="";
+  D.appendChild(el("h3",null,s.n+". "+s.t));
+  D.appendChild(el("div","kicker",s.d+(s.async?' · <span class="pill amber">后台线程</span>':'<span class="pill blue">请求路径内</span>')));
+  const b1=el("div","blk"); b1.appendChild(el("div","h","发生了什么")); b1.appendChild(el("div",null,s.what)); D.appendChild(b1);
+  const b2=el("div","blk"); b2.appendChild(el("div","h","涉及哪些文件与函数"));
+  s.files.forEach(([p,f,desc])=>{
+    const it=el("div","fileitem");
+    it.appendChild(el("div","fp",p));
+    it.appendChild(el("div","fn",f));
+    it.appendChild(el("div","fd",desc));
+    b2.appendChild(it);
+  });
+  D.appendChild(b2);
+  const b3=el("div","blk"); b3.appendChild(el("div","h","产出")); b3.appendChild(el("div",null,'<span class="pill green">'+s.out+'</span>')); D.appendChild(b3);
+  if(s.note){ const nb=el("div","note",s.note); D.appendChild(nb); }
+}
+
+/* ------------------------------------------------------------------ 模块地图 */
+const MAP=[
+ ["openspec/","openspec/changes/archive/2026-09-18-add-notify-hub/","proposal / design / architecture（模块级契约）/ tasks / 四份需求规格"],
+ ["根目录","pyproject.toml","依赖、打包、pytest 配置、notify 命令行入口"],
+ ["根目录","config.example.yaml","配置示例：服务、存储、规则、提醒参数、渠道"],
+ ["根目录","rules.example.yaml","分类规则示例"],
+ ["根目录","README.md","安装 / 配置 / 启动 / HTTP 与 CLI 示例"],
+
+ ["L0 共享契约","src/notify_hub/domain.py","跨模块共享的枚举与 ClassificationVerdict；不导入任何子模块以避免环"],
+ ["L0 共享契约","src/notify_hub/errors.py","共享异常类型（配置错误、规则文件错误等）"],
+ ["L0 共享契约","src/notify_hub/clock.py","时钟抽象与 as_utc() 时间归一化；ManualClock 供测试冻结时间"],
+ ["L0 组合根","src/notify_hub/context.py","组合根：按固定顺序装配全部对象，产出 AppContext"],
+ ["L0 组合根","src/notify_hub/app.py","FastAPI 工厂：挂载 API + Web 路由，lifespan 启停后台线程"],
+ ["L0 组合根","src/notify_hub/main.py","进程入口 python -m notify_hub"],
+ ["L0 组合根","src/notify_hub/__main__.py","模块入口转发"],
+
+ ["L1 基础层","src/notify_hub/config.py","加载校验 config.yaml、解析凭据环境变量、产出脱敏密钥集合"],
+ ["L1 基础层","src/notify_hub/redact.py","脱敏工具链：redact_text / redact_url / extract_url_secrets（含 query 与路径提取）"],
+ ["L1 基础层","src/notify_hub/logging_setup.py","日志初始化，把 SecretFilter 装到各 handler 上"],
+ ["L1 基础层","src/notify_hub/db.py","引擎、会话上下文（expire_on_commit=False）、幂等建表"],
+ ["L1 基础层","src/notify_hub/models.py","五张表 ORM：messages / todos / deliveries / todo_events / digest_runs"],
+
+ ["L2 领域层 · 分类","src/notify_hub/classifier/rules.py","规则 schema 与 YAML 解析"],
+ ["L2 领域层 · 分类","src/notify_hub/classifier/engine.py","匹配引擎（首个命中生效）"],
+ ["L2 领域层 · 分类","src/notify_hub/classifier/loader.py","规则加载与 mtime 轮询热加载；坏配置降级"],
+ ["L2 领域层 · 分类","src/notify_hub/classifier/__init__.py","门面 RuleClassifier + 后台重载线程"],
+ ["L2 领域层 · 投递","src/notify_hub/notifiers/base.py","适配器契约：Notifier 协议、NotificationMessage、DeliveryResult"],
+ ["L2 领域层 · 投递","src/notify_hub/notifiers/registry.py","按配置构造渠道实例；记录不可用原因；NOTIFIER_FACTORIES"],
+ ["L2 领域层 · 投递","src/notify_hub/notifiers/webhook.py","通用 Webhook 适配器（平铺 JSON、可配字段映射与请求头）"],
+ ["L2 领域层 · 投递","src/notify_hub/notifiers/email.py","SMTP 邮件适配器"],
+ ["L2 领域层 · 投递","src/notify_hub/notifiers/feishu.py","飞书专属适配器：嵌套载荷 + 加签 sign_feishu()"],
+ ["L2 领域层 · 投递","src/notify_hub/delivery.py","渠道选择与降级；每次尝试写投递记录"],
+ ["L2 领域层 · 服务","src/notify_hub/services/messages.py","消息读写（create / get / list / deliveries）"],
+ ["L2 领域层 · 服务","src/notify_hub/services/todos.py","待办生成去重、完成、列表详情、逐条提醒记账"],
+ ["L2 领域层 · 服务","src/notify_hub/services/notifications.py","notification_for_message / notification_for_digest 渲染；format_duration"],
+ ["L2 领域层 · 服务","src/notify_hub/services/digest.py","DigestService：按本地日期持久化每日汇总的定案/送达/失败状态"],
+ ["L2 领域层 · 服务","src/notify_hub/services/scheduler.py","ReminderScheduler：守护线程周期扫描本地时刻，每天发一条汇总"],
+
+ ["L3 编排层","src/notify_hub/pipeline.py","IngestPipeline：分类→落库→待办→队列/派发；工作线程生命周期"],
+
+ ["L4 入口层 · 认证","src/notify_hub/auth.py","访问认证：纯 ASGI 中间件 AuthGuard（仅标准库、不写日志）；除 /healthz 外全路由要求凭据，?token= 与会话 Cookie 二选一"],
+ ["L4 入口层 · API","src/notify_hub/api/schemas.py","请求/响应 Pydantic 模型（字段名即对外契约）"],
+ ["L4 入口层 · API","src/notify_hub/api/messages.py","投递、批量投递、消息详情（前缀 /api/v1/messages）"],
+ ["L4 入口层 · API","src/notify_hub/api/todos.py","待办列表与完成（前缀 /api/v1/todos）"],
+ ["L4 入口层 · API","src/notify_hub/api/health.py","/healthz，不探测任何渠道"],
+ ["L4 入口层 · API","src/notify_hub/api/__init__.py","组装 api 路由；create_api_app 供模块测试"],
+ ["L4 入口层 · Web","src/notify_hub/web/routes.py","页面路由与模板渲染；create_web_router / create_web_app"],
+ ["L4 入口层 · Web","src/notify_hub/web/templates/*.html","5 个模板：布局、待办列表/详情、消息列表/详情"],
+ ["L4 入口层 · CLI","src/notify_hub/cli.py","notify 命令行：投递与待办操作，只走 HTTP；服务端启用令牌后需 --token 或 NOTIFY_HUB_TOKEN"],
+
+ ["测试","tests/conftest.py","共享 fixture（惰性导入，保证收集期不依赖未实现模块）"],
+ ["测试","tests/test_config.py / test_redact.py","配置加载、脱敏（含路径 token 提取与安全阀）"],
+ ["测试","tests/test_models.py","四张表、部分唯一索引、时间往返"],
+ ["测试","tests/test_classifier.py","匹配语义、入待办判定、热加载、坏配置降级"],
+ ["测试","tests/test_notifiers.py / test_delivery.py","适配器契约、webhook、email、渠道降级"],
+ ["测试","tests/test_notifiers_feishu.py","飞书协议：载荷嵌套、加签位置、签名向量、错误判定"],
+ ["测试","tests/test_services.py / test_todos.py","消息落库、待办去重、完成幂等、提醒节奏"],
+ ["测试","tests/test_ingest.py / test_api_todos.py","HTTP 接口：202/422/207、详情、列表排序"],
+ ["测试","tests/test_web.py","页面渲染、303 重定向、XSS 转义"],
+ ["测试","tests/test_cli.py","退出码 0/1/2/3、stdin 正文、endpoint 优先级"],
+ ["测试","tests/test_docs_contract.py","文档契约：规则示例真加载、适配器示例真可跑、渠道文档覆盖"],
+ ["测试","tests/test_auth.py / test_cli_token.py / test_startup_warning.py","访问认证：守卫判定与 303/Cookie 交换、CLI 令牌、未配置令牌的启动告警"],
+ ["测试","tests/test_integration*.py / test_e2e.py","跨模块接缝：真实 socket、真实 uvicorn、真实热加载线程"]
+];
+
+function renderMap(q){
+  const box=$("#mapbody"); box.innerHTML="";
+  const needle=(q||"").trim().toLowerCase();
+  let last=null, tbody=null;
+  MAP.forEach(([g,p,d])=>{
+    if(needle && !(p+" "+d+" "+g).toLowerCase().includes(needle)) return;
+    if(g!==last){
+      last=g;
+      box.appendChild(el("div","grp",g));
+      const tb=el("table");
+      tb.appendChild(el("thead",null,"<tr><th style='width:38%'>路径</th><th>职责</th></tr>"));
+      tbody=document.createElement("tbody");
+      tb.appendChild(tbody);
+      box.appendChild(tb);
+    }
+    const tr=el("tr");
+    tr.appendChild(el("td","p",p));
+    tr.appendChild(el("td","d",d));
+    tbody.appendChild(tr);
+  });
+  if(!box.children.length) box.appendChild(el("div","note","没有匹配的条目。"));
+}
+
+/* ------------------------------------------------------------------ 不变量 */
+const INVS=[
+ ["时间：从库里读出来的时间一定是「裸」的",
+  "SQLite 不保留时区，<code>DateTime(timezone=True)</code> 存进去的 aware 时间读出来是 <b>naive</b> 的。任何参与比较或算术的时间，<b>必须先经 <code>clock.as_utc()</code> 归一化</b>。漏掉这一步，超时计算会静默错掉（不报错）。",
+  "clock.py · services/todos.py · services/scheduler.py"],
+ ["凭据：适配器从自己的 URL 派生脱敏密钥",
+  "脱敏密钥集合由 <code>config.credential_values()</code> 产出，它会把 URL 内嵌凭据展开成独立密钥——<b>query 参数</b>与<b>路径片段</b>都覆盖。更关键的是：每个适配器在 <code>__init__</code> 里还会自己调 <code>extract_url_secrets(自己的 URL)</code> 并合并进去，<b>即使调用方忘了传 secrets 也不会泄漏</b>。这条不变量是被同一类缺陷咬了三次之后才定下来的。",
+  "config.py · redact.py · notifiers/*.py"],
+ ["并发：除 FastAPI 路由外全是同步代码",
+  "<code>Notifier.send()</code> 同步；两个后台组件是「守护线程 + threading.Event」。首次通知不阻塞响应靠 <code>queue.Queue</code> + 工作线程，<b>不是</b> FastAPI 的 BackgroundTasks——后者在 TestClient 下会阻塞响应。",
+  "pipeline.py · services/scheduler.py · classifier/__init__.py"],
+ ["正文归属：NotificationMessage.body 已经是成品",
+  "<code>notification_for_message()</code> 产出的 <code>body</code> 已含「来源 / 分类 / 时间」与空行、原文；<code>notification_for_digest()</code> 的汇总正文同样是成品（逐条明细 + 尾部提示）。<b>适配器只负责呈现层的标题，正文一律原样使用 msg.body</b>。曾因两侧各拼一层表头，导致用户看到来源/时间重复两次。",
+  "services/notifications.py · notifiers/feishu.py · notifiers/email.py"],
+ ["认证：守卫只认查询参数与会话 Cookie，不读任何请求头",
+  "<code>AuthGuard</code> 的凭据来源只有两个：URL 查询串里的 <code>?token=</code>，以及会话 Cookie <code>nh_session</code>（值是令牌的 HMAC，<b>不是令牌本身</b>）。它<b>不读 <code>Authorization</code> 等任何请求头</b>——所以 CLI 也必须走查询参数（<code>--token</code> / <code>NOTIFY_HUB_TOKEN</code>）。比较一律 <code>hmac.compare_digest</code> 且<b>先编码为 bytes</b>。",
+  "auth.py · cli.py · app.py"],
+ ["认证：令牌未配置 = 鉴权整体关闭（刻意的 fail-open）",
+  "<code>server.auth_token</code> 为空时守卫在构造期即关闭、每请求直接透传（零开销路径）：既有测试与单机使用无需凭据。<b>主缓解不在应用里</b>——仓库外的暴露脚本在未配置令牌时拒绝启动转发；应用侧只有 <code>create_app</code> 里一条 WARNING。<b>暴露之前必须先配令牌</b>。",
+  "auth.py · app.py · config.py"]
+];
+function renderInvs(){
+  const box=$("#invs");
+  INVS.forEach(([t,d,w],i)=>{
+    const b=el("div","blk");
+    b.appendChild(el("div","h","不变量 "+(i+1)));
+    b.appendChild(el("div",null,"<b>"+t+"</b>"));
+    b.appendChild(el("div",null,d));
+    b.appendChild(el("div",null,'<span class="pill">'+w+'</span>'));
+    box.appendChild(b);
+  });
+}
+
+/* ------------------------------------------------------------------ 初始化 */
+document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
+  document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("on",x===t));
+  document.querySelectorAll(".view").forEach(v=>v.classList.toggle("on", v.id==="v-"+t.dataset.v));
+});
+renderSteps(); select(0); renderMap(""); renderInvs();
+$("#filter").oninput = e => renderMap(e.target.value);
+document.addEventListener("keydown", e=>{
+  if(e.key==="ArrowRight"||e.key==="ArrowLeft"){
+    const cur=[...document.querySelectorAll(".step")].findIndex(x=>x.classList.contains("on"));
+    const nxt=e.key==="ArrowRight"?Math.min(cur+1,STEPS.length-1):Math.max(cur-1,0);
+    select(nxt); document.querySelectorAll(".step")[nxt].scrollIntoView({block:"nearest"});
+  }
+});
+</script>
+</body>
+</html>

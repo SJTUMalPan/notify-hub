@@ -1,0 +1,35 @@
+{
+  "name": "dsh-ask-timeout-notify",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "DSH 宿主插件：ask_user_question 超过阈值无人回答时，向 notify-hub 投递一条待办",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./notify": "./lib/notify.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test --test-timeout=30000 test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "notify-hub"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

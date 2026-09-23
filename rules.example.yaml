@@ -1,0 +1,23 @@
+# notify-hub 分类规则示例。
+#
+# 形状与语义见 openspec/changes/add-notify-hub/architecture.md 第 6 节「模块 M3」。
+# 该文件同时被 M9 文档引用；修改时必须保持可被 RuleLoader 成功加载。
+case_sensitive: false
+
+defaults:
+  category: uncategorized
+  labels: []
+  need_ack: false
+  channel: webhook
+
+rules:
+  - id: backup-failure
+    match:
+      source: [db-backup, file-backup]      # equals：候选值之间是「或」
+      level: [error]                         # equals：与 Level.value 比较
+      title_contains: ["失败", "failed"]     # contains
+      body_contains: ["exit code"]           # contains
+    category: backup-failure
+    labels: [infra, backup]
+    need_ack: true
+    channel: email

@@ -1,0 +1,49 @@
+# notify-hub 配置示例
+#
+# 复制为 config.yaml 后按需修改（也可用环境变量 NOTIFY_HUB_CONFIG 指向其它路径）。
+# credentials 的值是**环境变量名**；服务启动时读取该环境变量的值作为凭据。
+# 若环境变量未设置，渠道的 credentials_complete 为 false（渠道不可用，但服务照常启动）。
+server:
+  host: 127.0.0.1
+  port: 8000
+  log_level: INFO
+storage:
+  db_path: ./data/notify.db
+rules:
+  path: ./rules.yaml
+  poll_interval_seconds: 5
+reminders:
+  at: "21:00"
+  timezone: "Asia/Shanghai"
+  scan_interval_seconds: 60
+retention:
+  # 数据保留期（天）。回收「本地日期早于 今天 - days」的记录：已完成的待办、
+  # **没有任何待办引用**的旧消息、以及过期的汇总状态。0 表示关闭回收。
+  #
+  # 必须是真正的整数——写成 30.0 或 "30" 会在启动时报错。这里是刻意的：
+  # 静默把一个和「删数据」有关的参数截断掉，不可接受。
+  #
+  # 两条硬约束（不可配置）：**未完成的待办永不回收**，**被任何待办引用的消息永不回收**。
+  # 所以存储的下界由「未完成待办数」决定，而不是纯时间——把事做完才会真正变小。
+  days: 30
+default_channel: webhook
+channels:
+  - id: webhook
+    type: webhook
+    enabled: true
+    params: { url_env: NOTIFY_WEBHOOK_URL, field_map: {}, headers: {} }
+    credentials: { url: NOTIFY_WEBHOOK_URL }
+  - id: email
+    type: email
+    enabled: false
+    params: { host: smtp.example.com, port: 587, use_tls: true,
+              sender: notify@example.com, recipients: [me@example.com] }
+    credentials: { password: NOTIFY_SMTP_PASSWORD }
+  - id: feishu
+    type: feishu
+    enabled: true
+    # 形态一：不用加签——只声明 url。
+    # 启用加签时再补上 secret: NOTIFY_FEISHU_SECRET（url 与 secret 两个环境变量都必须设置）。
+    # 不要写 `secret: null`：声明了 secret 却解析不出值，整个渠道会被判为不可用。
+    params: { timeout: 10 }
+    credentials: { url: NOTIFY_FEISHU_WEBHOOK_URL }
