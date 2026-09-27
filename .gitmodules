@@ -1,0 +1,3 @@
+[submodule "dsh-plugin"]
+	path = dsh-plugin
+	url = https://github.com/SJTUMalPan/dsh-ask-timeout-notify.git
