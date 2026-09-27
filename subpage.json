@@ -1,0 +1,15 @@
+{
+  "id": "notify-hub",
+  "title": "待办",
+  "icon": "inbox",
+  "order": 10,
+  "description": "统一消息汇聚、待办跟踪与多渠道通知服务的网页界面",
+  "target": "http://127.0.0.1:8000",
+  "health": "/healthz",
+  "style": "inherit",
+  "auth": {
+    "tokenFile": "$NOTIFY_HUB_CONFIG",
+    "tokenPath": "server.auth_token",
+    "queryParam": "token"
+  }
+}
