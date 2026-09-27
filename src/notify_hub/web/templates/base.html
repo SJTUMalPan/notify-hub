@@ -7,10 +7,10 @@
   {#
     样式来源分两路，互不冲突：
 
-    1) 挂载进 DSH 子页面门户（style: inherit）时，宿主会在 </head> 前注入
+    1) 挂载进 DSH 看板门户（style: inherit）时，宿主会在 </head> 前注入
        /subpages/_assets/subpage.css（Pico classless + 深色 token 层 + OS 字体栈）；
        本模板据此使用 Pico 语义元素（article / table / button / small）与 sp-* 组件类名，
-       因此在门户里与其它子页面风格一致。
+       因此在门户里与其它看板风格一致。
 
     2) 独立部署（notify-hub 自己的端口 / 公网入口）时没有宿主，所以页面**自带**同一套
        基础样式，脱离门户也好看。
