@@ -7,6 +7,20 @@ server:
   host: 127.0.0.1
   port: 8000
   log_level: INFO
+  # 访问令牌：除 /healthz 外的**每一个**路由都要求它（?token=… 或会话 Cookie）。
+  # ⚠️ 留空或删掉这一行 = 鉴权整体关闭：任何能连到本端口的人都能投递消息、读待办、
+  #    标记完成。单机本地使用可以接受；**一旦要对外暴露（含反向代理/端口转发），
+  #    必须先在这里配一个随机长令牌**。启动日志会就此发 WARNING。
+  # 生成示例：python3 -c "import secrets;print(secrets.token_urlsafe(32))"
+  auth_token: "REPLACE-WITH-YOUR-RANDOM-TOKEN"
+  # 单次请求的请求体字节数上限（正整数，缺省 1 MiB = 1048576）。超过即 413，不写库不投递。
+  # 计的是**实际读到的字节**，所以分块传输（无 Content-Length）同样受限。
+  # 没有「0 = 关闭上限」的语义：0/负数/非整数/null 一律在启动时报错——不限制请求体
+  # 等于允许单个请求把内存打满，那是更危险的一侧；要放宽就写一个更大的数字。
+  max_body_bytes: 1048576
+  # 单次批量投递（POST /api/v1/messages/batch）的条数上限（正整数，缺省 500）。
+  # 超过即整批 413，不做部分受理。取值要求同 max_body_bytes。
+  max_batch_items: 500
 storage:
   db_path: ./data/notify.db
 rules:

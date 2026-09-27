@@ -765,6 +765,23 @@ def test_readme_cli_options_exist_in_real_cli() -> None:
 # --------------------------------------------------------------------------- #
 # 第 5 条（tasks 10.4）：部署安全边界
 # --------------------------------------------------------------------------- #
+def test_example_config_declares_auth_token() -> None:
+    """示例配置必须带 ``server.auth_token`` 键，否则"照抄示例 = 一台无鉴权服务器"。
+
+    审计发现：``config.example.yaml`` 的 ``server:`` 段只有 host/port/log_level，
+    用户照抄就得到一台可被任意投递/读取/改写的服务（告警只写在 docs 与启动日志里，
+    照抄示例的人不会看到）。这条把"示例必须给出令牌键"钉住。
+    """
+    text = _read_text(CONFIG_EXAMPLE_PATH, what="配置示例")
+    assert "auth_token" in text, (
+        f"{CONFIG_EXAMPLE_PATH} 的 server 段必须包含 auth_token 键（并给出占位值），"
+        f"否则照抄示例就会得到一台无鉴权的服务"
+    )
+    assert "鉴权" in text, (
+        f"{CONFIG_EXAMPLE_PATH} 必须写明 auth_token 的后果（未配置时鉴权整体关闭）"
+    )
+
+
 def test_deployment_doc_states_loopback_and_systemd_boundary() -> None:
     text = _read_text(DEPLOYMENT_DOC_PATH, what="部署说明")
 
@@ -1003,3 +1020,78 @@ def test_retention_docs_contract() -> None:
         f"而 {CONFIG_DOC_PATH} 的 {_RETENTION_DAYS_HEADING} 小节写明的缺省值是 "
         f"{documented_default!r}；两处必须一起改（任一边单独改动都会红）"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 第 10 条（add-ingest-limits 增量）：两个上限键的文档契约
+# --------------------------------------------------------------------------- #
+def _documented_limit_default(config_doc: str, heading: str) -> int:
+    """从配置文档的某个上限小节里读出「缺省 N」的数值。"""
+    pattern = rf"^###\s+{re.escape(heading)}\s*$(.*?)(?=^###\s|\Z)"
+    match = re.search(pattern, config_doc, flags=re.MULTILINE | re.DOTALL)
+    assert match, f"{CONFIG_DOC_PATH} 缺少小节 `### {heading}`"
+    body = match.group(1)
+    found = re.search(r"缺省\s*`?([0-9]+)`?", body)
+    assert found, f"`### {heading}` 小节必须写明缺省值（应出现「缺省 <数字>」）：{body!r}"
+    return int(found.group(1))
+
+
+def test_ingest_limits_docs_contract() -> None:
+    """**契约**：请求体与批量条数上限必须同时出现在示例配置、配置文档与代码缺省值里。
+
+    这一条是审计「批量/请求体没有上限」的永久守卫：上限是 fail-closed 的安全默认，
+    如果只改了代码而文档没写，用户就不知道有这两道闸门、也不知道报 413 该往哪调；
+    反过来说，如果有人把缺省值改成「无上限」，这里也会立刻红。
+
+    判据只看「必需的说法是否出现」与「三处缺省值是否一致」，不冻结句式。
+    """
+    from notify_hub.config import Settings  # M1
+
+    raw_config = _read_text(CONFIG_EXAMPLE_PATH, what="config.example.yaml（只读引用）")
+    config_doc = _read_text(CONFIG_DOC_PATH, what="配置说明文档")
+
+    data = yaml.safe_load(raw_config)
+    assert isinstance(data, dict), f"{CONFIG_EXAMPLE_PATH} 的顶层必须是映射"
+    server = data.get("server")
+    assert isinstance(server, dict), f"{CONFIG_EXAMPLE_PATH} 必须含 `server` 段"
+
+    fields = Settings.__dataclass_fields__
+    code_defaults = {
+        "max_body_bytes": fields["max_body_bytes"].default,
+        "max_batch_items": fields["max_batch_items"].default,
+    }
+
+    for key, code_default in code_defaults.items():
+        # ---- 1. 示例配置里必须有这个键，且与代码缺省值一致 -------------------- #
+        assert key in server, (
+            f"{CONFIG_EXAMPLE_PATH} 的 `server` 段必须含 `{key}`：请求体/批量上限是"
+            f"fail-closed 的安全默认，示例配置是用户唯一会照抄的地方；"
+            f"实际的键：{sorted(str(item) for item in server)}"
+        )
+        assert server[key] == code_default, (
+            f"跨文件不一致：{CONFIG_EXAMPLE_PATH} 的 `server.{key}` = {server[key]!r}，"
+            f"而代码缺省值是 {code_default!r}"
+        )
+
+        # ---- 2. 配置文档写明缺省值，且与代码一致 ------------------------------ #
+        heading = f"server.{key}"
+        documented_default = _documented_limit_default(config_doc, heading)
+        assert documented_default == code_default, (
+            f"跨文件不一致：`### {heading}` 写明的缺省值是 {documented_default}，"
+            f"而代码缺省值是 {code_default}；两处必须一起改"
+        )
+
+        # ---- 3. 必须写明「没有 0 = 关闭上限」这条语义与 413 行为 -------------- #
+        section = re.search(
+            rf"^###\s+{re.escape(heading)}\s*$(.*?)(?=^###\s|\Z)",
+            config_doc,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        body = _normalized_doc(section.group(1) if section else "")
+        assert "413" in body, (
+            f"`### {heading}` 必须写明超限返回 HTTP 413，否则用户看到 413 不知道是上限拦的"
+        )
+        assert re.search(r"没有[^\n]{0,20}0[^\n]{0,20}关闭", body), (
+            f"`### {heading}` 必须写明**没有「`0` = 关闭上限」的语义**；"
+            f"不写清楚，用户会照抄 retention 的 `0` 习惯，以为 `0` 是「不限制」"
+        )
