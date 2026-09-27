@@ -10,9 +10,10 @@
 from __future__ import annotations
 
 import logging
+import traceback
 from typing import Iterable
 
-from notify_hub.redact import redact_text
+from notify_hub.redact import redact_urls_in_text
 
 __all__ = ["SecretFilter", "setup_logging", "get_logger"]
 
@@ -23,31 +24,47 @@ _DEFAULT_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 
 
 class SecretFilter(logging.Filter):
-    """对每条 ``LogRecord`` 的 ``msg``/``args`` 施加 :func:`redact_text`。"""
+    """对每条 ``LogRecord`` 的 ``msg``/``args``/``exc_info``/``stack_info`` 施加脱敏。"""
 
     def __init__(self, secrets: Iterable[str] = ()) -> None:
         super().__init__(name="notify_hub.secret_filter")
         self._secrets: tuple[str, ...] = tuple(s for s in secrets if s)
 
     def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003 - logging API 名称
-        if not self._secrets:
-            return True
-
         if isinstance(record.msg, str):
-            record.msg = redact_text(record.msg, self._secrets)
+            record.msg = redact_urls_in_text(record.msg, self._secrets)
         elif record.msg is not None:
-            record.msg = redact_text(str(record.msg), self._secrets)
+            record.msg = redact_urls_in_text(str(record.msg), self._secrets)
 
         if isinstance(record.args, tuple):
             record.args = tuple(
-                redact_text(arg, self._secrets) if isinstance(arg, str) else arg
+                redact_urls_in_text(arg, self._secrets) if isinstance(arg, str) else arg
                 for arg in record.args
             )
         elif isinstance(record.args, dict):
             record.args = {
-                key: (redact_text(value, self._secrets) if isinstance(value, str) else value)
+                key: (
+                    redact_urls_in_text(value, self._secrets)
+                    if isinstance(value, str)
+                    else value
+                )
                 for key, value in record.args.items()
             }
+
+        # ``Logger.exception`` / ``exc_info=True``：traceback 由 ``Formatter`` 从
+        # ``record.exc_info`` **现渲染**，完全不经过 msg/args，只清洗后两者的过滤器会漏掉
+        # 异常消息里的凭据（真实路径：httpx 的异常消息里带整条含 access_token 的 URL）。
+        # 这里先渲染成文本、施加脱敏，再放进 ``exc_text`` 并清空 ``exc_info``：
+        # ``Formatter.format`` 会复用 ``exc_text``，因此堆栈照常输出、只是已脱敏。
+        if record.exc_info is not None:
+            record.exc_text = redact_urls_in_text(
+                "".join(traceback.format_exception(*record.exc_info)), self._secrets
+            )
+            record.exc_info = None
+
+        if record.stack_info:
+            record.stack_info = redact_urls_in_text(record.stack_info, self._secrets)
+
         return True
 
 

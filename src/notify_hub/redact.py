@@ -18,6 +18,7 @@ __all__ = [
     "SENSITIVE_KEYS",
     "redact_text",
     "redact_url",
+    "redact_urls_in_text",
     "extract_url_secrets",
     "redact_mapping",
     "redact_exception",
@@ -197,3 +198,36 @@ def redact_mapping(data: Mapping[str, Any], secrets: Iterable[str] = ()) -> dict
 def redact_exception(exc: BaseException, secrets: Iterable[str] = ()) -> str:
     """把异常渲染成 ``'<类型>: <脱敏后的消息>'``。"""
     return f"{type(exc).__name__}: {redact_text(str(exc), secrets)}"
+
+
+#: 自由文本中形如 URL 的片段（用于对 traceback 这类**非结构化文本**施加 URL 规则）。
+_URL_IN_TEXT_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s\"'<>\\]+")
+
+#: 自由文本中的 ``?key=value`` / ``&key=value``（覆盖没有 scheme 的裸 query 串）。
+_BARE_QUERY_PAIR_RE = re.compile(r"([?&])([^=&?\s]+)=([^&\s]*)")
+
+
+def redact_urls_in_text(text: str, secrets: Iterable[str] = ()) -> str:
+    """对**任意文本**施加 :func:`redact_url` 的无条件规则（第 1、2 条）。
+
+    专为日志自由文本设计：``logger.exception`` 渲染出的 traceback 里嵌着完整 URL，
+    而调用方往往不知道凭据是什么（凭据由环境变量展开），因此这里**不能**只依赖
+    ``secrets``——URL 的 userinfo 密码与敏感 query 值必须无条件掩码。
+    """
+    if text is None:
+        return text
+    secrets = tuple(secrets)
+
+    def _mask_url(match: re.Match[str]) -> str:
+        return redact_url(match.group(0), secrets)
+
+    result = _URL_IN_TEXT_RE.sub(_mask_url, str(text))
+
+    def _mask_pair(match: re.Match[str]) -> str:
+        separator, key, _value = match.group(1), match.group(2), match.group(3)
+        if _is_sensitive_key(key):
+            return f"{separator}{key}={MASK}"
+        return match.group(0)
+
+    result = _BARE_QUERY_PAIR_RE.sub(_mask_pair, result)
+    return redact_text(result, secrets)

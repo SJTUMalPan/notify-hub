@@ -771,3 +771,57 @@ def test_webhook_derives_secrets_from_own_url_when_caller_passes_none(caplog):
     # 断言本体：调用方没传 secrets，裸 token 仍不得出现在失败原因与日志中
     assert PATH_TOKEN not in (result.error_reason or "")
     assert PATH_TOKEN not in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# P1（2026-XX 安全审计）：STARTTLS 必须校验证书
+# --------------------------------------------------------------------------- #
+def test_email_starttls_verifies_the_server_certificate():
+    """``use_tls`` 下必须传入校验用的 SSLContext。
+
+    ``smtplib.SMTP.starttls()`` 在不传 ``context`` 时**不做任何证书校验**，
+    等价于接受任意中间人证书；配置里写着 ``use_tls`` 却连不到「TLS 是否可信」，
+    是审计给的「低」等级问题，但修复成本为零，因此按 fail-closed 直接修掉。
+    """
+    import ssl
+
+    from notify_hub.notifiers.email import EmailNotifier
+
+    captured: dict[str, Any] = {}
+
+    class _FakeSMTP:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def starttls(self, *args: Any, **kwargs: Any):
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return (220, b"ready")
+
+        def sendmail(self, *args: Any, **kwargs: Any):
+            return {}
+
+        def quit(self) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    notifier = EmailNotifier(
+        "email",
+        host="smtp.invalid",
+        use_tls=True,
+        sender="notify@example.com",
+        recipients=["me@example.com"],
+        smtp_factory=_FakeSMTP,
+    )
+
+    result = notifier.send(_new_message())
+
+    assert result.ok is True, f"前置条件未触发：投递失败（{result.error_reason!r}）"
+    context = captured["kwargs"].get("context")
+    assert isinstance(context, ssl.SSLContext), (
+        f"starttls 必须显式传 context，实际 kwargs={captured['kwargs']!r}"
+    )
+    assert context.verify_mode == ssl.CERT_REQUIRED, "必须要求证书校验"
+    assert context.check_hostname is True, "必须校验主机名"

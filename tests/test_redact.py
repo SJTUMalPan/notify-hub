@@ -351,3 +351,60 @@ def test_caplog_records_are_redacted_for_inherited_loggers(caplog) -> None:
     rendered = "\n".join(record.getMessage() for record in caplog.records)
     assert rendered
     assert secret not in rendered
+
+
+# --------------------------------------------------------------------------- #
+# P1（安全审计）：SecretFilter 过去只清洗 msg/args，traceback 会绕过它
+# --------------------------------------------------------------------------- #
+def _format_with_filter(secrets, *, exc_message: str) -> str:
+    """把一条 ``logger.exception`` 记录经装了 SecretFilter 的真实 handler 渲染成文本。"""
+    import io
+
+    from notify_hub.logging_setup import SecretFilter
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.addFilter(SecretFilter(secrets))
+    logger = logging.getLogger("notify_hub.audit_probe")
+    logger.propagate = False
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
+    try:
+        raise RuntimeError(exc_message)
+    except RuntimeError:
+        logger.exception("派发失败")
+    finally:
+        logger.removeHandler(handler)
+    return stream.getvalue()
+
+
+def test_secret_filter_redacts_exception_tracebacks() -> None:
+    """``logger.exception`` 的 traceback 必须与 msg/args 同等脱敏。
+
+    ``Formatter`` 是从 ``record.exc_info`` 现渲染异常的，**不经过** ``record.msg``/``args``，
+    因此只清洗后两者的过滤器会漏出异常消息里的凭据。真实泄漏路径：
+    ``httpx.ConnectError`` 的消息里带整条 webhook URL（query 含 ``access_token``）。
+    """
+    secret = "TRACEBACKSECRET"
+    rendered = _format_with_filter(
+        [secret], exc_message=f"connect failed: https://h/p?access_token={secret}"
+    )
+
+    assert "派发失败" in rendered, "前置条件未触发：日志未渲染"
+    assert "RuntimeError" in rendered, "前置条件未触发：traceback 未被渲染"
+    assert secret not in rendered, f"traceback 泄漏了凭据：{rendered!r}"
+    assert MASK in rendered
+
+
+def test_secret_filter_scrubs_url_credentials_without_explicit_secrets() -> None:
+    """未传 ``secrets`` 时也必须按 URL 规则掩码凭据（与 ``redact_url`` 的无条件规则一致）。
+
+    调用方可能压根不知道该渠道的凭据（凭据来自环境变量展开），漏传 ``secrets``
+    不应成为「整条 traceback 明文入库」的理由。
+    """
+    rendered = _format_with_filter(
+        (), exc_message="connect failed: https://h/p?access_token=RAWSECRET123456"
+    )
+
+    assert "RuntimeError" in rendered, "前置条件未触发：traceback 未被渲染"
+    assert "RAWSECRET123456" not in rendered, f"traceback 泄漏了凭据：{rendered!r}"

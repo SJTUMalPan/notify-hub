@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import smtplib
+import ssl
 from email.message import EmailMessage as _EmailMessage
 from typing import Callable, Sequence
 
@@ -43,6 +44,7 @@ class EmailNotifier:
         recipients: Sequence[str],
         timeout: float = 10.0,
         smtp_factory: Callable[[], smtplib.SMTP] | None = None,
+        tls_context: ssl.SSLContext | None = None,
         secrets: Sequence[str] = (),
     ) -> None:
         self.channel_id = channel_id
@@ -55,6 +57,12 @@ class EmailNotifier:
         self._recipients = list(recipients)
         self._timeout = timeout
         self._smtp_factory = smtp_factory
+        # 审计修复：``smtplib.SMTP.starttls()`` 不传 context 时**不校验证书**（接受任意
+        # 中间人证书）。默认用 ``create_default_context()``：CERT_REQUIRED + 校验主机名。
+        # 构造期就建好，配置/系统 CA 有问题时由注册表计入 unavailable_reasons（fail-closed）。
+        self._tls_context = tls_context if tls_context is not None else (
+            ssl.create_default_context() if use_tls else None
+        )
         self._secrets = tuple(secrets)
 
     # ------------------------------------------------------------------ #
@@ -81,7 +89,7 @@ class EmailNotifier:
             message = self._build_message(msg)
             client = self._new_client()
             if self._use_tls:
-                client.starttls()
+                client.starttls(context=self._tls_context)
             if self._username is not None:
                 client.login(self._username, self._password or "")
             client.sendmail(self._sender, list(self._recipients), message.as_bytes())
