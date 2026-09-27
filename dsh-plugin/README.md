@@ -49,7 +49,7 @@
 ### 本机开发（符号链接，改完即生效，不用重装）
 
 ```bash
-dsh plugin --profile web add /workspace/deepseek_workspace/message/dsh-plugin
+dsh plugin --profile web add "$PWD/dsh-plugin"   # 在仓库根目录执行
 ```
 
 > 裸路径与 `file:` 是 **pnpm link 语义（符号链接）**：源码改了不用重装，但**换机器就断**，
