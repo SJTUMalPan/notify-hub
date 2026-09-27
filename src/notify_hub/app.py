@@ -33,6 +33,7 @@ from notify_hub.api import create_api_router
 from notify_hub.auth import AuthGuard
 from notify_hub.config import load_settings
 from notify_hub.context import AppContext, build_context
+from notify_hub.limits import BodyLimit
 from notify_hub.web import create_web_router
 
 
@@ -66,7 +67,11 @@ def create_app(settings=None, *, ctx: AppContext | None = None) -> FastAPI:
 
     app = FastAPI(title="notify-hub", version=__version__, lifespan=_lifespan)
     app.state.ctx = ctx
-    # 中间件必须在应用启动前挂上；装在路由之前，两条路由都被覆盖。
+    # 中间件必须在应用启动前挂上；装上之后两条路由都被覆盖。
+    # add-ingest-limits：Starlette 的 add_middleware 是**后加的更靠外**，因此这里先注册
+    # BodyLimit、再注册 AuthGuard，最终顺序是 AuthGuard(BodyLimit(app))——
+    # 未认证的请求不该有机会消耗读取预算（该变更 design.md D5）。
+    app.add_middleware(BodyLimit, max_bytes=ctx.settings.max_body_bytes)
     app.add_middleware(AuthGuard, token=ctx.settings.auth_token)
     if ctx.settings.auth_token is None:
         # design.md D4 的缓解措施之一：fail-open 默认必须**看得见**。

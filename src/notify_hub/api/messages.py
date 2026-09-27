@@ -139,7 +139,22 @@ def post_batch(
     items: list[Any] = Body(...),
     ctx: AppContext = Depends(_ctx),
 ) -> BatchAccepted:
-    """逐条独立处理裸 JSON 数组；单条非法不影响其它条目。"""
+    """逐条独立处理裸 JSON 数组；单条非法不影响其它条目。
+
+    add-ingest-limits：条数超过 ``server.max_batch_items`` 时**整批拒绝**（413）。
+    数组元素数只有解析完 JSON 才知道，因此这条闸门只能放在这里——但它仍然发生在
+    任何一条消息落库之前，与「单条非法不影响其它条」的既有契约不冲突。
+    """
+    limit = ctx.settings.max_batch_items
+    if len(items) > limit:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"批量条数 {len(items)} 超过上限 {limit}"
+                f"（server.max_batch_items），本批次未受理任何一条消息"
+            ),
+        )
+
     results: list[BatchItemResult] = []
     accepted_count = 0
     for index, raw in enumerate(items):

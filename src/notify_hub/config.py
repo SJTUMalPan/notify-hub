@@ -91,6 +91,13 @@ class RetentionSettings:
         return self.days > 0
 
 
+#: add-ingest-limits：请求体上限缺省值（1 MiB）。正常消息体远小于此。
+_DEFAULT_MAX_BODY_BYTES = 1024 * 1024
+
+#: add-ingest-limits：单次批量投递的条数上限缺省值。
+_DEFAULT_MAX_BATCH_ITEMS = 500
+
+
 @dataclass(frozen=True)
 class Settings:
     """服务运行期配置。路径类字段与数值类字段永不为 None。
@@ -110,6 +117,10 @@ class Settings:
     log_level: str = "INFO"
     auth_token: str | None = None
     retention: RetentionSettings = RetentionSettings()
+    # add-ingest-limits：接入端点的 fail-closed 上限。都必须显式给正整数，
+    # ``0`` **不表示**「关闭上限」（见该变更 design.md D2）。
+    max_body_bytes: int = _DEFAULT_MAX_BODY_BYTES
+    max_batch_items: int = _DEFAULT_MAX_BATCH_ITEMS
 
 
 # --------------------------------------------------------------------------- #
@@ -348,6 +359,12 @@ def load_settings(
 
     auth_token = _parse_auth_token(server)
     retention = _parse_retention(data.get("retention"))
+    max_body_bytes = _parse_limit(
+        server, "max_body_bytes", _DEFAULT_MAX_BODY_BYTES
+    )
+    max_batch_items = _parse_limit(
+        server, "max_batch_items", _DEFAULT_MAX_BATCH_ITEMS
+    )
 
     return Settings(
         db_path=db_path,
@@ -364,7 +381,39 @@ def load_settings(
         log_level=str(server.get("log_level", "INFO")),
         auth_token=auth_token,
         retention=retention,
+        max_body_bytes=max_body_bytes,
+        max_batch_items=max_batch_items,
     )
+
+
+def _parse_limit(server: Mapping[str, Any], key: str, default: int) -> int:
+    """解析 ``server.max_body_bytes`` / ``server.max_batch_items``（add-ingest-limits）。
+
+    契约（见该变更 ``design.md`` D2）：
+
+    - 键缺失 → 用缺省值（上限**默认生效**，fail-closed）
+    - 值必须是**真正的正整数**：``bool``、``float``、字符串、``0``、负数一律报错；
+      显式写 ``null`` 同样报错（沿用 ``retention.days`` 的先例：安全相关的参数
+      不接受「看起来像没设」的写法）
+    - **没有**「0 = 关闭上限」的语义。保留期用 ``0`` 表示关闭是因为那一侧更安全；
+      上限的 ``0`` 表示「允许打满内存」，是不安全的一侧，因此拒绝。要放宽就写一个
+      更大的数字，让「我主动放大了上限」留在配置里可见
+    """
+    if key not in server:
+        return default
+    raw = server[key]
+    label = f"server.{key}"
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ConfigurationError(
+            f"{label} 必须是正整数，实际为 {raw!r}"
+            "（没有「0 = 关闭上限」的语义；要放宽就写一个更大的数字）"
+        )
+    if raw <= 0:
+        raise ConfigurationError(
+            f"{label} 必须 > 0，实际为 {raw}"
+            "（没有「0 = 关闭上限」的语义；要放宽就写一个更大的数字）"
+        )
+    return raw
 
 
 def _parse_auth_token(server: Mapping[str, Any]) -> str | None:
