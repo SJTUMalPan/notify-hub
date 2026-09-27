@@ -8,7 +8,11 @@
   "health": "/healthz",
   "style": "inherit",
   "auth": {
-    "tokenFile": "$NOTIFY_HUB_CONFIG",
+    "tokenFileCandidates": [
+      "$NOTIFY_HUB_CONFIG",
+      "~/notify-hub-run/config.yaml",
+      "./config.yaml"
+    ],
     "tokenPath": "server.auth_token",
     "queryParam": "token"
   }
